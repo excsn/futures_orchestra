@@ -57,7 +57,7 @@ Configuration primarily happens during the instantiation of the `FuturePoolManag
 
 ## 3. Main Types and Their Public Methods
 
-### `struct FuturePoolManager<R: Send + Sync + 'static>`
+### `struct FuturePoolManager<R: Send + 'static>`
 
 The main struct for managing and interacting with the task pool.
 

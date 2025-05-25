@@ -32,7 +32,7 @@ pub enum ShutdownMode {
 }
 
 #[derive(Clone)]
-pub struct FuturePoolManager<R: Send + Sync + 'static> {
+pub struct FuturePoolManager<R: Send  + 'static> {
   pool_name: Arc<String>,
   semaphore: Arc<Semaphore>,
   task_queue_tx: kanal::AsyncSender<ManagedTaskInternal<R>>,
@@ -41,7 +41,7 @@ pub struct FuturePoolManager<R: Send + Sync + 'static> {
   worker_join_handle_internal: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
-impl<R: Send + Sync + 'static> FuturePoolManager<R> {
+impl<R: Send  + 'static> FuturePoolManager<R> {
   pub fn new(concurrency_limit: usize, queue_capacity: usize, tokio_handle: TokioHandle, pool_name: &str) -> Arc<Self> {
     let (tx, rx) = kanal::bounded_async(queue_capacity.max(1));
     let shutdown_token = CancellationToken::new();
@@ -168,7 +168,7 @@ impl<R: Send + Sync + 'static> FuturePoolManager<R> {
     if !already_initiating_shutdown {
       info!(pool_name = %self.pool_name, "Initiating explicit pool shutdown (mode: {:?}).", mode);
       self.shutdown_token.cancel();
-      self.task_queue_tx.close();
+      let _ = self.task_queue_tx.close();
       info!(pool_name = %self.pool_name, "Shutdown token cancelled and task queue sender closed.");
 
       if mode == ShutdownMode::ForcefulCancel {
@@ -407,7 +407,7 @@ impl<R: Send + Sync + 'static> FuturePoolManager<R> {
   }
 }
 
-impl<R: Send + Sync + 'static> Drop for FuturePoolManager<R> {
+impl<R: Send  + 'static> Drop for FuturePoolManager<R> {
   fn drop(&mut self) {
     // Check if shutdown has already been initiated (e.g., by an explicit call to `shutdown()`)
     // or if this is the first time we're triggering shutdown signals due to Drop.
@@ -431,7 +431,7 @@ impl<R: Send + Sync + 'static> Drop for FuturePoolManager<R> {
       // - More importantly, this will cause `task_queue_rx.recv()` in the worker loop
       //   to eventually return `Err`, which is a condition for the worker loop to terminate
       //   if it's blocked on receiving from an empty queue.
-      self.task_queue_tx.close();
+      let _ = self.task_queue_tx.close();
 
       // Regarding `self.worker_join_handle_internal`:
       // This field is an `Arc<Mutex<Option<JoinHandle<()>>>>`.

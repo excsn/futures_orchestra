@@ -12,10 +12,10 @@ pub type TaskLabel = String;
 
 /// The type of future that the pool executes.
 /// It must be `Send` and `'static`, and produce a result of type `R`.
-pub type TaskToExecute<R> = Pin<Box<dyn Future<Output = R> + Send + Sync + 'static>>;
+pub type TaskToExecute<R> = Pin<Box<dyn Future<Output = R> + Send + 'static>>;
 
 /// Internal representation of a task managed by the pool.
-pub(crate) struct ManagedTaskInternal<R: Send + Sync + 'static> {
+pub(crate) struct ManagedTaskInternal<R: Send + 'static> {
   pub(crate) task_id: u64,
   pub(crate) labels: HashSet<TaskLabel>,
   pub(crate) future: TaskToExecute<R>,
