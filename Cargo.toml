@@ -1,0 +1,26 @@
+[package]
+name = "futures_orchestra"
+version = "1.0.0"
+edition = "2021"
+authors = ["Excerion Sun <dev@excsn.com>"]
+description = "A Tokio-based task pool for managing concurrent execution of futures with queuing, labeling, and cancellation."
+license = "MPL-2.0"
+repository = "https://github.com/excsn/futures_orchestra"
+readme = "README.md"
+keywords = ["async", "tokio", "concurrency", "future", "pool"]
+categories = ["asynchronous", "concurrency"]
+
+[dependencies]
+kanal = "^0"
+tokio = { version = "^1", features = ["sync", "rt", "macros"] }
+tokio-util = { version = "0.7" }
+futures = { version = "^0.3" } 
+tracing = "^0.1"
+dashmap = "^5.5"
+lazy_static = "^1.4"
+thiserror = "^2.0"
+
+[dev-dependencies]
+tokio = { version = "^1", features = ["full"] }
+tracing-subscriber = { version = "^0.3", features = ["fmt", "env-filter"] }
+rand = "^0.9"
