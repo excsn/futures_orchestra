@@ -1,6 +1,6 @@
 [package]
 name = "futures_orchestra"
-version = "1.2.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["Excerion Sun <dev@excsn.com>"]
 description = "A Tokio-based task pool for managing concurrent execution of futures with queuing, labeling, notifications and cancellation."
@@ -12,7 +12,7 @@ categories = ["asynchronous", "concurrency"]
 
 [dependencies]
 kanal = "^0"
-tokio = { version = "^1", features = ["sync", "rt", "macros"] }
+tokio = { version = "^1", features = ["sync", "rt", "macros", "time"] }
 tokio-util = { version = "0.7" }
 futures = { version = "^0.3" } 
 tracing = "^0.1"
