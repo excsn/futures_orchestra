@@ -4,9 +4,11 @@
 mod error;
 mod handle;
 mod manager;
+mod notifier;
 mod task;
 
 pub use error::PoolError;
 pub use handle::TaskHandle;
 pub use manager::{FuturePoolManager, ShutdownMode};
+pub use notifier::{TaskCompletionInfo, TaskCompletionStatus};
 pub use task::{TaskLabel, TaskToExecute};

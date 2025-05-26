@@ -4,13 +4,13 @@ This document provides a detailed API reference for the `futures_orchestra` libr
 
 ## 1. Introduction / Core Concepts
 
-`futures_orchestra` is a library designed for managing and executing asynchronous tasks (futures) in a controlled, concurrent environment within the Tokio runtime. It provides mechanisms for limiting concurrency, queuing tasks, labeling tasks for group operations, and cooperative cancellation.
+`futures_orchestra` is a library designed for managing and executing asynchronous tasks (futures) in a controlled, concurrent environment within the Tokio runtime. It provides mechanisms for limiting concurrency, queuing tasks, labeling tasks for group operations, cooperative cancellation, and completion notifications.
 
 **Core Concepts & Primary Structs/Classes:**
 
 *   **`FuturePoolManager<R>`**:
-    *   **Description**: The central component and main entry point for the library. It manages a pool of workers, a task queue, and a semaphore to control concurrency. It's responsible for accepting task submissions, scheduling their execution, and handling the pool's lifecycle, including shutdown.
-    *   **Interaction**: Users create an instance of `FuturePoolManager` (typically an `Arc<FuturePoolManager<R>>`) and use it to submit tasks and manage the pool. `R` is the success type returned by the futures executed by the pool.
+    *   **Description**: The central component and main entry point for the library. It manages a pool of workers, a task queue, and a semaphore to control concurrency. It's responsible for accepting task submissions, scheduling their execution, and handling the pool's lifecycle, including shutdown. `FuturePoolManager` implements `Clone`, allowing instances to be easily shared to interact with the same underlying pool.
+    *   **Interaction**: Users create an instance of `FuturePoolManager`. `R` is the success type returned by the futures executed by the pool.
 
 *   **`TaskHandle<R>`**:
     *   **Description**: A handle returned when a task is successfully submitted to the `FuturePoolManager`. It allows users to interact with an individual task, such as awaiting its result or requesting its cancellation. `R` matches the result type of the submitted future.
@@ -30,14 +30,17 @@ This document provides a detailed API reference for the `futures_orchestra` libr
 *   **Cooperative Cancellation**:
     *   **Description**: Cancellation is signaled through `tokio_util::sync::CancellationToken`. The `FuturePoolManager`'s worker loop uses `tokio::select!` to race the execution of a task's future against its associated cancellation token. If the token is cancelled, the future's execution is aborted by the pool.
 
+*   **Completion Notification System**:
+    *   **Description**: The pool can notify registered handlers about the completion status (success, panic, cancellation, error) of each task. This is managed by an internal `CompletionNotifier` which processes notifications asynchronously. See `FuturePoolManager::add_completion_handler`, `TaskCompletionInfo`, and `TaskCompletionStatus`.
+
 *   **Shutdown Mechanism**:
-    *   **Description**: The pool can be shut down gracefully (allowing active tasks to complete) or forcefully (attempting to cancel active tasks). The `FuturePoolManager` also implements `Drop` for implicit signaling of shutdown if all `Arc` references are dropped.
+    *   **Description**: The pool can be shut down gracefully (allowing active tasks to complete) or forcefully (attempting to cancel active tasks). The `FuturePoolManager` also implements `Drop` for implicit signaling of shutdown.
 
 **Pervasive Types/Patterns:**
 
 *   **`PoolError`**: The primary error enum used throughout the library for all fallible operations.
 *   **`Result<T, PoolError>`**: Most public methods that can fail return this standard Rust `Result` type, specialized with `PoolError`.
-*   **`Arc<FuturePoolManager<R>>`**: The `FuturePoolManager::new` constructor returns an `Arc`-wrapped manager, facilitating shared ownership and usage across different parts of an application (e.g., different async tasks or threads).
+*   **Cloning `FuturePoolManager<R>`**: `FuturePoolManager` implements `Clone`. Cloning an instance creates a new handle that interacts with the same underlying pool, as its internal components responsible for shared state (like the task queue sender, semaphore, shutdown token) are themselves cloneable (often `Arc`-wrapped or specialized senders/tokens).
 
 ## 2. Configuration
 
@@ -59,12 +62,12 @@ Configuration primarily happens during the instantiation of the `FuturePoolManag
 
 ### `struct FuturePoolManager<R: Send + 'static>`
 
-The main struct for managing and interacting with the task pool.
+The main struct for managing and interacting with the task pool. It implements `Clone`.
 
 **Constructors:**
 
-*   `pub fn new(concurrency_limit: usize, queue_capacity: usize, tokio_handle: tokio::runtime::Handle, pool_name: &str) -> std::sync::Arc<Self>`
-    *   Creates a new `FuturePoolManager` instance, wrapped in an `Arc`.
+*   `pub fn new(concurrency_limit: usize, queue_capacity: usize, tokio_handle: tokio::runtime::Handle, pool_name: &str) -> Self`
+    *   Creates a new `FuturePoolManager` instance.
     *   `R` is the success type of the futures this pool will manage.
 
 **Methods:**
@@ -90,16 +93,22 @@ The main struct for managing and interacting with the task pool.
 *   `pub fn cancel_tasks_by_labels(&self, labels_to_cancel: &std::collections::HashSet<TaskLabel>)`
     *   Requests cancellation for all currently active tasks that have one or more of the labels in `labels_to_cancel`.
 
-*   `pub async fn shutdown(self: std::sync::Arc<Self>, mode: ShutdownMode) -> Result<(), PoolError>`
-    *   Initiates an explicit shutdown of the pool. This method consumes an `Arc<Self>`.
+*   `pub fn add_completion_handler(&self, handler: impl Fn(TaskCompletionInfo) + Send + Sync + 'static)`
+    *   Registers a handler function to be called upon task completion, cancellation, or panic.
+    *   Multiple handlers can be registered. Each handler will be invoked with `TaskCompletionInfo` detailing the outcome of a task.
+    *   Handlers are executed asynchronously by the notifier's dedicated worker and should aim to be non-blocking. Panics within a handler are caught and logged.
+
+*   `pub async fn shutdown(self, mode: ShutdownMode) -> Result<(), PoolError>`
+    *   Initiates an explicit shutdown of the pool. This method consumes the `FuturePoolManager` instance.
     *   `mode`: The `ShutdownMode` (Graceful or ForcefulCancel) to use.
-    *   Awaits the termination of the internal worker loop. Returns `Ok(())` on successful shutdown, or a `PoolError` if an issue occurs during shutdown (though primarily errors relate to internal state issues, not task execution errors).
+    *   Awaits the termination of the internal worker loop and the completion notification system. Returns `Ok(())` on successful shutdown, or a `PoolError` if an issue occurs during shutdown.
 
 **`Drop` Implementation:**
-`FuturePoolManager<R>` implements `std::ops::Drop`. When the last `Arc<FuturePoolManager<R>>` is dropped, if an explicit shutdown has not already been initiated, it will:
-1.  Cancel the internal global shutdown token.
-2.  Close the task submission queue (`task_queue_tx`).
-This effectively signals the worker loop to terminate but does *not* block or await its completion. For guaranteed cleanup and worker joining, an explicit `shutdown()` call is recommended.
+`FuturePoolManager<R>` implements `std::ops::Drop`. When a `FuturePoolManager<R>` instance is dropped, if an explicit shutdown has not already been initiated for the underlying shared pool state:
+1.  The internal global shutdown token is cancelled.
+2.  The task submission queue (`task_queue_tx`) is closed.
+3.  The internal notification sender to the completion notifier is closed.
+This effectively signals the worker loop and notifier to terminate but does *not* block or await their completion. For guaranteed cleanup and joining, an explicit `shutdown()` call is recommended.
 
 ### `struct TaskHandle<R: Send + 'static>`
 
@@ -125,6 +134,23 @@ A handle to a task that has been submitted to the pool. `R` is the success type 
     *   Returns `Ok(R)` if the task completes successfully with a value of type `R`.
     *   Returns `Err(PoolError)` if the task panics (`PoolError::TaskPanicked`), is cancelled (`PoolError::TaskCancelled`), the result channel is broken (`PoolError::ResultChannelError`), or if this method has already been called (`PoolError::ResultUnavailable`).
 
+### `struct TaskCompletionInfo`
+
+Provides detailed information about a task's completion, used with `FuturePoolManager::add_completion_handler`.
+
+**Public Fields:**
+
+*   `pub task_id: u64`
+    *   The unique ID of the completed task.
+*   `pub pool_name: std::sync::Arc<String>`
+    *   The name of the pool that managed the task.
+*   `pub labels: std::sync::Arc<std::collections::HashSet<TaskLabel>>`
+    *   An `Arc` clone of the labels associated with the task.
+*   `pub status: TaskCompletionStatus`
+    *   The final status of the task (e.g., Success, Cancelled, Panicked).
+*   `pub completion_time: std::time::SystemTime`
+    *   The timestamp when the task's completion was recorded by the notifier.
+
 ## 4. Public Traits and Their Methods
 
 There are no public traits defined in this library for external implementation by users.
@@ -133,6 +159,14 @@ There are no public traits defined in this library for external implementation b
 
 *   **`PoolError`** (See [9. Error Handling](#9-error-handling) for variants)
     *   **Description**: Represents all possible errors that can occur within the `futures_orchestra` pool operations.
+
+*   **`TaskCompletionStatus`**
+    *   **Description**: Indicates the outcome of a task, used in `TaskCompletionInfo`.
+    *   **Variants**:
+        *   `Success`: The task completed successfully.
+        *   `Cancelled`: The task was cancelled.
+        *   `Panicked`: The task panicked during execution.
+        *   `PoolErrorOccurred`: The task terminated due to another `PoolError` (e.g., result channel issues not covered by other specific statuses).
 
 ## 6. Public Functions (Free-standing)
 
@@ -160,12 +194,11 @@ The primary error type used throughout the library. It implements `std::error::E
 
 **Variants:**
 
-*   `QueueSendError(String)`: Failed to submit a task to the pool's internal queue. The `String` contains details about the send error.
 *   `ResultChannelError(String)`: An error occurred with the `tokio::sync::oneshot` channel used to communicate the task's result back to its `TaskHandle`. This can happen if the task panicked before sending, was cancelled abruptly, or the `TaskHandle` (receiver) was dropped. The `String` provides more context.
 *   `ResultUnavailable`: `TaskHandle::await_result()` was called when the result had already been taken or the channel was otherwise not available (e.g., called multiple times).
 *   `SemaphoreClosed`: The pool's internal `tokio::sync::Semaphore` was unexpectedly closed, preventing new tasks from acquiring permits.
-*   `QueueSendChannelClosed`: The sender side of the pool's internal task queue (`kanal::AsyncSender`) was unexpectedly closed.
-*   `QueueReceiveChannelClosed`: The receiver side of the pool's internal task queue (`kanal::AsyncReceiver`) was unexpectedly closed.
+*   `QueueSendChannelClosed`: The sender side of the pool's internal task queue (`kanal::AsyncSender`) was unexpectedly closed when trying to submit a task. This typically indicates the pool is shutting down or has encountered a critical error.
+*   `QueueReceiveChannelClosed`: The receiver side of the pool's internal task queue (`kanal::AsyncReceiver`) was unexpectedly closed. This is an internal error condition for the worker loop.
 *   `TaskPanicked`: The submitted task future panicked during its execution.
 *   `TaskCancelled`: The task was cancelled before it could complete.
 *   `PoolShuttingDown`: An operation was attempted (e.g., submitting a new task) while the pool is in the process of shutting down or has already shut down.
@@ -182,3 +215,5 @@ The public API is primarily exposed from the crate root. Key types are:
 *   `futures_orchestra::ShutdownMode`
 *   `futures_orchestra::TaskLabel` (type alias)
 *   `futures_orchestra::TaskToExecute<R>` (type alias)
+*   `futures_orchestra::TaskCompletionInfo`
+*   `futures_orchestra::TaskCompletionStatus`
