@@ -3,9 +3,6 @@ use thiserror::Error;
 /// Errors that can occur within the `futures_orchestra` pool.
 #[derive(Error, Debug, PartialEq)]
 pub enum PoolError {
-  #[error("Failed to submit task to the pool queue: {0}")]
-  QueueSendError(String),
-
   #[error("Task result channel error (task might have panicked, was cancelled, or receiver dropped): {0}")]
   ResultChannelError(String),
 

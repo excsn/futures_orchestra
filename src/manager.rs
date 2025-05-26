@@ -16,10 +16,6 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{self, debug, error, info, info_span, trace, warn, Instrument};
 
-lazy_static::lazy_static! {
-  static ref NEXT_POOL_TASK_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
-}
-
 /// Defines how the pool should behave upon shutdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownMode {
@@ -32,16 +28,17 @@ pub enum ShutdownMode {
 }
 
 #[derive(Clone)]
-pub struct FuturePoolManager<R: Send  + 'static> {
+pub struct FuturePoolManager<R: Send + 'static> {
   pool_name: Arc<String>,
   semaphore: Arc<Semaphore>,
   task_queue_tx: kanal::AsyncSender<ManagedTaskInternal<R>>,
   active_task_info: Arc<DashMap<u64, (CancellationToken, Arc<HashSet<TaskLabel>>)>>,
   shutdown_token: CancellationToken,
   worker_join_handle_internal: Arc<Mutex<Option<JoinHandle<()>>>>,
+  next_task_id: Arc<AtomicU64>,
 }
 
-impl<R: Send  + 'static> FuturePoolManager<R> {
+impl<R: Send + 'static> FuturePoolManager<R> {
   pub fn new(concurrency_limit: usize, queue_capacity: usize, tokio_handle: TokioHandle, pool_name: &str) -> Arc<Self> {
     let (tx, rx) = kanal::bounded_async(queue_capacity.max(1));
     let shutdown_token = CancellationToken::new();
@@ -54,6 +51,7 @@ impl<R: Send  + 'static> FuturePoolManager<R> {
       active_task_info: Arc::new(DashMap::new()),
       shutdown_token: shutdown_token.clone(),
       worker_join_handle_internal: worker_join_handle_internal_arc.clone(),
+      next_task_id: Arc::new(AtomicU64::new(0)),
     });
 
     let worker_pool_name = manager_arc.pool_name.clone();
@@ -107,7 +105,7 @@ impl<R: Send  + 'static> FuturePoolManager<R> {
       return Err(PoolError::PoolShuttingDown);
     }
 
-    let task_id = NEXT_POOL_TASK_ID_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+    let task_id = self.next_task_id.fetch_add(1, AtomicOrdering::Relaxed);
     let token = CancellationToken::new();
     let (result_tx, result_rx) = oneshot::channel::<Result<R, PoolError>>();
     let arc_labels = Arc::new(labels);
@@ -130,24 +128,15 @@ impl<R: Send  + 'static> FuturePoolManager<R> {
         labels: arc_labels,
       }),
       Err(send_error) => {
-        // send_error is kanal::SendError<ManagedTaskInternal<R>>
-        // The task that failed to send is send_error.0 (if SendError were a tuple struct)
-        // or send_error.into_inner() if kanal provides such a method, or just by accessing its field.
-        // For kanal, SendError<T> holds T. We can reclaim it with send_error.into_inner()
-        // let _task_not_sent = send_error.into_inner(); // Reclaim the task if needed
-
-        // The primary reason for send failure is channel closed, usually due to shutdown.
         error!(
           pool_name = %self.pool_name,
-          %task_id, // task_id is defined above, still relevant for logging context
-          "Submit: Failed to send task to queue. Kanal SendError: {:?}", // Log the specific error
+          %task_id,
+          "Submit: Failed to send task to queue. Kanal SendError: {:?}",
           send_error
         );
-        // Check reason for closed channel
         if self.shutdown_token.is_cancelled() || self.task_queue_tx.is_closed() {
           Err(PoolError::PoolShuttingDown)
         } else {
-          // This case (send error but not apparently shutting down) should be rare.
           Err(PoolError::QueueSendChannelClosed)
         }
       }
@@ -407,7 +396,7 @@ impl<R: Send  + 'static> FuturePoolManager<R> {
   }
 }
 
-impl<R: Send  + 'static> Drop for FuturePoolManager<R> {
+impl<R: Send + 'static> Drop for FuturePoolManager<R> {
   fn drop(&mut self) {
     // Check if shutdown has already been initiated (e.g., by an explicit call to `shutdown()`)
     // or if this is the first time we're triggering shutdown signals due to Drop.
