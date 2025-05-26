@@ -31,6 +31,7 @@ pub enum ShutdownMode {
 
 #[derive(Clone)]
 pub struct FuturePoolManager<R: Send + 'static> {
+  shutdown_guard: Arc<()>,
   pool_name: Arc<String>,
   semaphore: Arc<Semaphore>,
   task_queue_tx: AsyncSender<ManagedTaskInternal<R>>,
@@ -60,6 +61,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
     );
 
     let manager = Self {
+      shutdown_guard: Arc::new(()),
       pool_name: pool_name_arc_for_components, // Use the same Arc
       semaphore: Arc::new(Semaphore::new(concurrency_limit.max(1))),
       task_queue_tx: tx,
@@ -537,6 +539,11 @@ impl<R: Send + 'static> FuturePoolManager<R> {
 
 impl<R: Send + 'static> Drop for FuturePoolManager<R> {
   fn drop(&mut self) {
+
+    if Arc::strong_count(&self.shutdown_guard) > 1 {
+      return;
+    }
+    
     if !self.shutdown_token.is_cancelled() {
       info!(
         pool_name = %*self.pool_name,
