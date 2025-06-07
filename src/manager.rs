@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dashmap::DashMap;
+use fibre::mpsc::{self, AsyncSender};
 use futures::FutureExt;
-use kanal::{self, AsyncSender};
 use tokio::runtime::Handle as TokioHandle;
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
@@ -46,12 +46,12 @@ pub struct FuturePoolManager<R: Send + 'static> {
 impl<R: Send + 'static> FuturePoolManager<R> {
   pub fn new(concurrency_limit: usize, queue_capacity: usize, tokio_handle: TokioHandle, pool_name: &str) -> Self {
     let pool_name_arc_for_components = Arc::new(pool_name.to_string()); // Used for notifier and manager's own name
-    let (tx, rx) = kanal::bounded_async(queue_capacity.max(1));
+    let (tx, rx) = mpsc::unbounded_async();
     let shutdown_token = CancellationToken::new();
     let worker_join_handle_internal_arc = Arc::new(Mutex::new(None));
 
     let (internal_noti_tx_for_fpm, internal_notification_rx_for_notifier_worker) =
-      kanal::unbounded_async::<InternalCompletionMessage>();
+      mpsc::unbounded_async::<InternalCompletionMessage>();
 
     let notifier_arc = CompletionNotifier::new(
       internal_notification_rx_for_notifier_worker,
@@ -321,7 +321,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
   async fn run_worker_loop(
     pool_name: Arc<String>,
     semaphore: Arc<Semaphore>,
-    task_queue_rx: kanal::AsyncReceiver<ManagedTaskInternal<R>>,
+    task_queue_rx: mpsc::AsyncReceiver<ManagedTaskInternal<R>>,
     tasks_tokio_handle: TokioHandle,
     active_task_info_map: Arc<DashMap<u64, (CancellationToken, Arc<HashSet<TaskLabel>>)>>,
     shutdown_token: CancellationToken,
@@ -539,11 +539,10 @@ impl<R: Send + 'static> FuturePoolManager<R> {
 
 impl<R: Send + 'static> Drop for FuturePoolManager<R> {
   fn drop(&mut self) {
-
     if Arc::strong_count(&self.shutdown_guard) > 1 {
       return;
     }
-    
+
     if !self.shutdown_token.is_cancelled() {
       info!(
         pool_name = %*self.pool_name,

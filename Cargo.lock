@@ -79,6 +79,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fibre"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baa0b4b926a9566aa5ee5e6251584a37d376a0d222f008addf15c3706890af69"
+dependencies = [
+ "futures-core",
+ "futures-util",
+ "lazy_static",
+ "parking_lot",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -169,11 +181,11 @@ dependencies = [
 
 [[package]]
 name = "futures_orchestra"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "dashmap",
+ "fibre",
  "futures",
- "kanal",
  "lazy_static",
  "rand",
  "thiserror",
@@ -206,16 +218,6 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-
-[[package]]
-name = "kanal"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e3953adf0cd667798b396c2fa13552d6d9b3269d7dd1154c4c416442d1ff574"
-dependencies = [
- "futures-core",
- "lock_api",
-]
 
 [[package]]
 name = "lazy_static"

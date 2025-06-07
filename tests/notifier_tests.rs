@@ -382,7 +382,7 @@ async fn test_completion_notifier_during_graceful_shutdown() {
   assert_eq!(manager.active_task_count(), 1);
   assert_eq!(manager.queued_task_count(), 1);
 
-  manager.clone().shutdown(ShutdownMode::Graceful).await.unwrap(); // manager is consumed
+  manager.shutdown(ShutdownMode::Graceful).await.unwrap(); // manager is consumed
 
   // Check handle results
   assert_eq!(handle_a.await_result().await, Ok("task_a_graceful".to_string()));
@@ -422,7 +422,7 @@ async fn test_completion_notifier_during_forceful_shutdown() {
   assert_eq!(manager.active_task_count(), 1);
   assert_eq!(manager.queued_task_count(), 1);
 
-  manager.clone().shutdown(ShutdownMode::ForcefulCancel).await.unwrap();
+  manager.shutdown(ShutdownMode::ForcefulCancel).await.unwrap();
 
   // Check handle results
   match handle_a.await_result().await {

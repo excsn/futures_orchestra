@@ -1,6 +1,6 @@
 use crate::error::PoolError;
 use crate::task::TaskLabel;
-use kanal::{AsyncReceiver, ReceiveError};
+use fibre::mpsc::{AsyncReceiver, RecvError};
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex, Once, RwLock};
@@ -224,10 +224,7 @@ impl CompletionNotifier {
               // means the channel is closed AND empty. All senders must have been dropped.
               // This is the primary, correct way for this loop to terminate.
               match receive_error {
-                ReceiveError::SendClosed => {
-                    info!("Notification worker: Message queue senders all closed (SendClosed from recv()). Terminating.");
-                }
-                ReceiveError::Closed => {
+                RecvError::Disconnected => {
                     info!("Notification worker: Message queue explicitly closed or all senders dropped (Closed from recv()). Terminating.");
                 }
               }
