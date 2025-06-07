@@ -3,9 +3,12 @@
 
 mod error;
 mod handle;
+mod capacity_gate;
 mod manager;
 mod notifier;
 mod task;
+mod task_queue;
+
 
 pub use error::PoolError;
 pub use handle::TaskHandle;
