@@ -2,6 +2,7 @@ use crate::error::PoolError;
 use crate::task::TaskLabel;
 use std::collections::HashSet;
 use std::sync::Arc;
+use fibre::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing;
 
@@ -12,7 +13,7 @@ use tracing;
 pub struct TaskHandle<R: Send + 'static> {
   pub(crate) task_id: u64,
   pub(crate) cancellation_token: CancellationToken,
-  pub(crate) result_receiver: Option<tokio::sync::oneshot::Receiver<Result<R, PoolError>>>,
+  pub(crate) result_receiver: Option<oneshot::Receiver<Result<R, PoolError>>>,
   pub(crate) labels: Arc<HashSet<TaskLabel>>,
 }
 
@@ -49,7 +50,7 @@ impl<R: Send + 'static> TaskHandle<R> {
   pub async fn await_result(mut self) -> Result<R, PoolError> {
     match self.result_receiver.take() {
       Some(rx) => {
-        match rx.await {
+        match rx.recv().await {
           Ok(task_outcome_result) => task_outcome_result, // This is already Result<R, PoolError>
           Err(oneshot_recv_error) => {
             // This means the sender side was dropped without sending a value,

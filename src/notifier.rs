@@ -4,7 +4,7 @@ use fibre::mpsc::{AsyncReceiver, RecvError};
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex, Once, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -152,7 +152,7 @@ impl CompletionNotifier {
   }
 
   async fn run_notification_worker_loop(
-    mut queue_rx: AsyncReceiver<InternalCompletionMessage>,
+    queue_rx: AsyncReceiver<InternalCompletionMessage>,
     handlers_list_arc: Arc<RwLock<Vec<Arc<dyn Fn(TaskCompletionInfo) + Send + Sync + 'static>>>>,
     tokio_handle_for_spawning_handlers: TokioHandle,
     pool_shutdown_token: CancellationToken, // Kept for logging, but primary exit is queue closure

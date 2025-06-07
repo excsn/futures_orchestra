@@ -1,6 +1,20 @@
 use futures_intrusive::sync::{GenericSemaphoreReleaser, Semaphore};
 use parking_lot::RawMutex;
-use std::future::Future;
+use std::{future::Future, sync::Arc};
+
+// New struct for the owned permit. It holds an Arc to the gate,
+// making it 'static.
+#[derive(Debug)]
+pub(crate) struct OwnedPermitGuard {
+    gate: Arc<CapacityGate>,
+}
+
+// When the owned guard is dropped, it releases the permit.
+impl Drop for OwnedPermitGuard {
+    fn drop(&mut self) {
+        self.gate.release();
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct CapacityGate {
@@ -21,6 +35,19 @@ impl CapacityGate {
   /// Acquires a permit, returning a future that resolves to a RAII guard.
   pub fn acquire(&self) -> impl Future<Output = PermitGuard<'_>> {
     self.semaphore.acquire(1)
+  }
+
+  /// NEW METHOD: Acquires an owned permit.
+  /// The returned future and the resulting guard are 'static.
+  pub fn acquire_owned(self: Arc<Self>) -> impl Future<Output = OwnedPermitGuard> {
+    async move {
+      // Await the underlying semaphore using a temporary borrow.
+      let _temporary_guard = self.semaphore.acquire(1).await;
+      // Forget the temporary guard so it doesn't release the permit.
+      std::mem::forget(_temporary_guard);
+      // Return our new owned guard, which will release the permit on drop.
+      OwnedPermitGuard { gate: self }
+    }
   }
 
   /// Releases a permit back to the gate.
@@ -55,7 +82,6 @@ mod tests {
     assert_eq!(gate.get_permits(), 5);
   }
 
-  // ... rest of the tests are the same ...
   #[tokio::test]
   async fn acquire_and_release_on_drop() {
     let gate = CapacityGate::new(2);

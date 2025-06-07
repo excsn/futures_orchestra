@@ -27,10 +27,10 @@ This guide provides detailed information on how to use the `futures_orchestra` l
 *   **`TaskHandle<R>`**: Returned upon successful task submission. It allows interaction with the submitted task, such as awaiting its result or requesting cancellation.
 *   **`TaskLabel`**: A `String` used to categorize tasks. Tasks can have multiple labels. These labels are primarily used for bulk cancellation.
 *   **`CompletionNotifier` System**: An internal system that allows users to register handlers to be notified about task completion events (success, panic, cancellation, etc.). See `FuturePoolManager::add_completion_handler`, `TaskCompletionInfo`, and `TaskCompletionStatus`.
-*   **Semaphore**: Internally, a `tokio::sync::Semaphore` controls how many tasks can run concurrently.
-*   **Queue**: An internal `kanal` asynchronous MPMC queue holds tasks that are waiting for a semaphore permit to run.
+*   **Concurrency Gate**: An internal mechanism, built around a semaphore, controls how many tasks can run concurrently.
+*   **Queue**: An internal asynchronous, lock-free channel holds tasks that are waiting for a concurrency permit to run.
 *   **Cooperative Cancellation**: Cancellation is signaled via `tokio_util::sync::CancellationToken`. The pool uses `tokio::select!` to race task execution against its cancellation token. Futures themselves don't directly receive the token but are interrupted if the token is cancelled.
-*   **Worker Loop**: An internal asynchronous loop that dequeues tasks, acquires semaphore permits, and spawns tasks onto the provided Tokio runtime.
+*   **Worker Loop**: An internal asynchronous loop that dequeues tasks, acquires concurrency permits, and spawns tasks onto the provided Tokio runtime.
 
 ## Quick Start
 
@@ -123,12 +123,12 @@ let manager_instance = FuturePoolManager::<MyResultType>::new(
 // To share the manager, clone it:
 let another_handle_to_same_pool = manager_instance.clone();
 ```
-*   `concurrency_limit: usize`: The maximum number of tasks that can be actively running at any given time. Must be at least 1.
-*   `queue_capacity: usize`: The maximum number of tasks that can be held in the pending queue. Must be at least 1.
+*   `concurrency_limit: usize`: The maximum number of tasks that can be actively running at any given time.
+*   `queue_capacity: usize`: The maximum number of tasks that can be held in the pending queue.
 *   `tokio_handle: tokio::runtime::Handle`: A handle to the Tokio runtime on which the pool's worker tasks will be spawned.
 *   `pool_name: &str`: A descriptive name for the pool, used in logging.
 
-`FuturePoolManager` implements `Clone`. Cloning creates another handle to the same underlying pool infrastructure (semaphore, task queue, etc.).
+`FuturePoolManager` implements `Clone`. Cloning creates another handle to the same underlying pool infrastructure (concurrency gate, task queue, etc.).
 
 ### ShutdownMode
 
@@ -178,7 +178,7 @@ The main entry point for interacting with the thread pool. It implements `Clone`
     Initiates the shutdown process for the pool. This consumes the `FuturePoolManager` instance.
 
 **Drop Implementation:**
-If a `FuturePoolManager<R>` instance is dropped, and it's effectively the last handle managing the underlying pool state (or if explicit shutdown hasn't been fully processed), an implicit shutdown sequence is initiated. It signals the internal shutdown token, closes the task submission queue, and the completion notification channel. This behaves like a graceful shutdown signal but does *not* block or await worker termination. For explicit control and to ensure workers join, call `shutdown()` manually.
+If a `FuturePoolManager<R>` instance is dropped, and it's the last handle managing the underlying pool state, an implicit shutdown sequence is initiated. It signals the internal shutdown token and closes the task submission queue. This behaves like a graceful shutdown signal but does *not* block or await worker termination. For explicit control and to ensure workers join, call `shutdown()` manually.
 
 ### `TaskHandle<R: Send + 'static>`
 
@@ -266,11 +266,6 @@ async fn main() {
     println!("Cancelling tasks with label: {}", label_critical);
     pool.cancel_tasks_by_label(&label_critical);
 
-    // Await results (task1 should be cancelled, task2 should complete if its duration is short)
-    // For this example, my_long_task(2) will also likely be cancelled if it started
-    // or may complete if cancellation is very fast and it hasn't been picked up yet.
-    // In a real scenario, its duration would differ or it wouldn't share the cancellation signal.
-
     match task1.await_result().await {
         Err(futures_orchestra::PoolError::TaskCancelled) => println!("Task 1 correctly cancelled."),
         res => println!("Task 1 result: {:?}", res),
@@ -302,20 +297,6 @@ async fn example_shutdown_usage() {
         Ok(()) => println!("Pool shutdown gracefully."),
         Err(e) => eprintln!("Error during graceful shutdown: {:?}", e),
     }
-
-    // If you need to initiate shutdown but keep the original manager handle (e.g., for stats later,
-    // though stats might not be meaningful after shutdown starts):
-    // let another_pool_handle = FuturePoolManager::<String>::new(1,1, Handle::current(), "another_pool");
-    // let pool_for_shutdown = another_pool_handle.clone(); // Clone the manager
-    // tokio::spawn(async move {
-    //     match pool_for_shutdown.shutdown(ShutdownMode::ForcefulCancel).await {
-    //         Ok(()) => println!("Pool shutdown forcefully (via clone)."),
-    //         Err(e) => eprintln!("Error during forceful shutdown: {:?}", e),
-    //     }
-    // });
-    // println!("Original pool handle still exists.");
-    // // Note: After shutdown is initiated, further operations on `another_pool_handle`
-    // // might fail if the pool is already shutting down.
 }
 ```
 The `shutdown` method takes `self` by value, consuming the specific `FuturePoolManager` instance it's called on. It ensures that the internal worker loop and notifier are properly joined.
@@ -351,8 +332,8 @@ async fn main() {
     // Handler 1: Simple logger
     manager.add_completion_handler(|info: TaskCompletionInfo| {
         println!(
-            "[Handler 1] Task {} (Pool: {}) completed. Status: {:?}, Labels: {:?}, Time: {:?}",
-            info.task_id, info.pool_name, info.status, info.labels, info.completion_time
+            "[Handler 1] Task {} (Pool: {}) completed. Status: {:?}, Labels: {:?}",
+            info.task_id, info.pool_name, info.status, info.labels
         );
     });
 
@@ -377,7 +358,6 @@ async fn main() {
 
     // Wait for tasks to likely complete or be processed by notifier
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    // In a real app, you'd await handles or use other synchronization.
 
     manager.shutdown(ShutdownMode::Graceful).await.unwrap();
 
@@ -392,40 +372,10 @@ Handlers are executed asynchronously in dedicated tasks and should be non-blocki
 
 The library uses a dedicated error enum `PoolError` for all fallible operations.
 
-```rust
-// From src/error.rs:
-// #[derive(Error, Debug, PartialEq)]
-// pub enum PoolError {
-//   #[error("Task result channel error (task might have panicked, was cancelled, or receiver dropped): {0}")]
-//   ResultChannelError(String),
-
-//   #[error("Task result already taken or channel was not available")]
-//   ResultUnavailable,
-
-//   #[error("Pool's internal semaphore was closed unexpectedly")]
-//   SemaphoreClosed,
-
-//   #[error("Pool's internal task queue (sender side) was closed unexpectedly")]
-//   QueueSendChannelClosed,
-
-//   #[error("Pool's internal task queue (receiver side) was closed unexpectedly")]
-//   QueueReceiveChannelClosed,
-
-//   #[error("Submitted task future panicked")]
-//   TaskPanicked,
-  
-//   #[error("Task was cancelled")]
-//   TaskCancelled,
-
-//   #[error("Pool is shutting down or already shut down, cannot accept new tasks")]
-//   PoolShuttingDown,
-// }
-```
-
 **Key Error Variants:**
-*   `PoolError::ResultChannelError(String)`: The oneshot channel for a task's result was broken. This can occur if the task logic itself has an issue before sending a result, if the task was cancelled in a specific way that prevents sending a clear "cancelled" status through the channel, or if the `TaskHandle` was dropped.
+*   `PoolError::ResultChannelError(String)`: The channel for a task's result was broken. This can occur if the task logic itself has an issue before sending a result or if the task was dropped from the queue during shutdown.
 *   `PoolError::ResultUnavailable`: `TaskHandle::await_result()` was called more than once.
-*   `PoolError::SemaphoreClosed`: The pool's concurrency-limiting semaphore closed unexpectedly. This is a critical internal error.
+*   `PoolError::SemaphoreClosed`: The pool's internal concurrency gate (the mechanism limiting the number of active tasks) was closed unexpectedly. This is a critical internal error.
 *   `PoolError::QueueSendChannelClosed`: Failed to send a task to the internal queue because the queue's sender channel is closed. This usually means the pool is shutting down or has an internal fault.
 *   `PoolError::QueueReceiveChannelClosed`: The pool's worker could not receive tasks from the queue because the receiver channel is closed. This is an internal error condition.
 *   `PoolError::TaskPanicked`: The future submitted as a task panicked during its execution.

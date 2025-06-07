@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 
-use tokio::sync::oneshot;
+use fibre::oneshot;
 use tokio_util::sync::CancellationToken;
 
 /// A descriptive label for a task, typically a `String`.
@@ -20,5 +20,5 @@ pub(crate) struct ManagedTaskInternal<R: Send + 'static> {
   pub(crate) labels: HashSet<TaskLabel>,
   pub(crate) future: TaskToExecute<R>,
   pub(crate) token: CancellationToken,
-  pub(crate) result_sender: Option<oneshot::Sender<Result<R, PoolError>>>, // Option to allow taking
+  pub(crate) result_sender: Option<oneshot::Sender<Result<R, PoolError>>>,
 }

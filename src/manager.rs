@@ -1,5 +1,4 @@
-// src/manager.rs
-
+use crate::capacity_gate::CapacityGate;
 use crate::error::PoolError;
 use crate::handle::TaskHandle;
 use crate::notifier::{CompletionNotifier, InternalCompletionMessage, TaskCompletionStatus};
@@ -15,9 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dashmap::DashMap;
+use fibre::oneshot::oneshot;
 use futures::FutureExt;
 use tokio::runtime::Handle as TokioHandle;
-use tokio::sync::{oneshot, Semaphore};
+use tokio::time::timeout;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{self, debug, error, info, info_span, trace, warn, Instrument};
@@ -60,7 +60,7 @@ pub struct FuturePoolManager<R: Send + 'static> {
   /// The user-provided name of the pool, used for logging and identification.
   pool_name: Arc<String>,
   /// A semaphore to limit the number of concurrently *executing* tasks.
-  concurrency_semaphore: Arc<Semaphore>,
+  concurrency_gate: Arc<CapacityGate>,
   /// The producer handle for the lock-free, bounded task queue.
   task_queue: QueueProducer<R>,
   /// A map holding cancellation tokens and labels for all *active* tasks.
@@ -110,7 +110,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
     let manager = Self {
       shutdown_guard: Arc::new(()),
       pool_name: pool_name_arc_for_components,
-      concurrency_semaphore: Arc::new(Semaphore::new(concurrency_limit.max(1))),
+      concurrency_gate: Arc::new(CapacityGate::new(concurrency_limit.max(1))),
       task_queue: producer_queue,
       active_task_info: Arc::new(DashMap::new()),
       shutdown_token: shutdown_token.clone(),
@@ -121,7 +121,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
     };
 
     let worker_pool_name = manager.pool_name.clone();
-    let worker_semaphore = manager.concurrency_semaphore.clone();
+    let worker_semaphore = manager.concurrency_gate.clone();
     let worker_active_task_info = manager.active_task_info.clone();
     let worker_tokio_handle = tokio_handle.clone();
     let worker_shutdown_token = shutdown_token.clone();
@@ -190,7 +190,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
 
     let task_id = self.next_task_id.fetch_add(1, AtomicOrdering::Relaxed);
     let token = CancellationToken::new();
-    let (result_tx, result_rx) = oneshot::channel::<Result<R, PoolError>>();
+    let (result_tx, result_rx) = oneshot::<Result<R, PoolError>>();
     let arc_labels = Arc::new(labels);
 
     let managed_task = ManagedTaskInternal {
@@ -339,7 +339,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
         pool_name = %self.pool_name,
         "Waiting for main worker loop to join."
       );
-      if let Err(join_error) = tokio::time::timeout(Duration::from_secs(5), handle).await {
+      if let Err(join_error) = timeout(Duration::from_secs(5), handle).await {
         error!(
           pool_name = %self.pool_name,
           "Timeout or error joining main worker loop: {:?}.",
@@ -419,7 +419,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
   /// 4. Handling shutdown signals.
   async fn run_worker_loop(
     pool_name: Arc<String>,
-    concurrency_semaphore: Arc<Semaphore>,
+    concurrency_gate: Arc<CapacityGate>,
     task_queue: QueueConsumer<R>,
     tasks_tokio_handle: TokioHandle,
     active_task_info_map: Arc<DashMap<u64, (CancellationToken, Arc<HashSet<TaskLabel>>)>>,
@@ -435,20 +435,16 @@ impl<R: Send + 'static> FuturePoolManager<R> {
               info!(name = %pool_name, "Shutdown signal (token) received. Worker loop terminating.");
               break;
           }
-          res = concurrency_semaphore.clone().acquire_owned() => {
-              match res {
-                  Ok(p) => p,
-                  Err(_) => {
-                      error!(name = %*pool_name, "Concurrency semaphore closed. Worker loop exiting.");
-                      break;
-                  }
-              }
+          permit = concurrency_gate.clone().acquire_owned() => {
+            // The `acquire` future resolves to the permit guard.
+            permit
           }
       };
+
       trace!(
         name = %*pool_name,
         "Acquired concurrency permit. Available: {}",
-        concurrency_semaphore.available_permits()
+        concurrency_gate.get_permits()
       );
 
       let managed_task_option = tokio::select! {

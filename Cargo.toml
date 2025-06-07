@@ -16,8 +16,8 @@ dashmap = "^5.5"
 futures = { version = "^0.3" } 
 futures-intrusive = "^0.5"
 futures-util = { version = "^0.3", default-features = false } 
-tokio = { version = "^1", features = ["sync", "rt", "macros", "time"] }
-tokio-util = { version = "0.7" }
+tokio = { version = "^1", features = ["rt", "macros", "time"] }
+tokio-util = { version = "^0.7" }
 parking_lot = "^0.12"
 lazy_static = "^1.4"
 thiserror = "^2.0"
@@ -27,5 +27,3 @@ tracing = "^0.1"
 tokio = { version = "^1", features = ["full"] }
 tracing-subscriber = { version = "^0.3", features = ["fmt", "env-filter"] }
 rand = "^0.9"
-fastrand = "1.9"
-loom = "^0.7"

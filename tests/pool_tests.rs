@@ -1,11 +1,8 @@
-use futures_orchestra::{FuturePoolManager, PoolError, ShutdownMode, TaskHandle, TaskLabel, TaskToExecute};
+use futures_orchestra::{FuturePoolManager, PoolError, ShutdownMode, TaskToExecute};
 use std::collections::HashSet;
-// use std::future::Future; // Not directly needed here
-// use std::pin::Pin; // Not directly needed here
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-// use tokio::sync::Barrier; // Might use later for more complex coordination
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -54,7 +51,7 @@ fn create_task(
 // For simplicity in example, each test calls it, but Once ensures it runs once.
 fn setup_tracing_for_test() {
   use std::sync::Once;
-  use tracing_subscriber::{fmt, util::SubscriberInitExt, EnvFilter}; // Added SubscriberInitExt
+  use tracing_subscriber::{fmt, EnvFilter}; // Added SubscriberInitExt
   static TRACING_INIT: Once = Once::new();
 
   TRACING_INIT.call_once(|| {
@@ -496,7 +493,7 @@ async fn test_concurrency_limit_and_queuing() {
   tracing::info!("Starting test: {}", pool_name);
   // Concurrency 1, queue large enough
   let manager = FuturePoolManager::<String>::new(1, 5, tokio::runtime::Handle::current(), pool_name);
-  let completion_order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+  let completion_order = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
   let mut handles = Vec::new();
 
@@ -506,7 +503,7 @@ async fn test_concurrency_limit_and_queuing() {
     let task_future = Box::pin(async move {
       tracing::info!("Task {} starting execution.", task_id);
       sleep(Duration::from_millis(100 + (task_id as u64 * 20))).await; // Staggered completion
-      let mut order = completion_order_clone.lock().await;
+      let mut order = completion_order_clone.lock();
       order.push(task_id);
       tracing::info!("Task {} finished execution. Order: {:?}", task_id, *order);
       format!("task_{}_done", task_id)
@@ -524,7 +521,7 @@ async fn test_concurrency_limit_and_queuing() {
     handle.await_result().await.unwrap();
   }
 
-  let final_order = completion_order.lock().await;
+  let final_order = completion_order.lock();
   assert_eq!(
     *final_order,
     vec![1, 2, 3],
