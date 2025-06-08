@@ -209,6 +209,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
         cancellation_token: token,
         result_receiver: Some(result_rx),
         labels: arc_labels,
+        is_detached: false,
       }),
       Err(e) => {
         error!(
@@ -541,7 +542,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
             let completion_status = TaskCompletionStatus::from(&execution_outcome);
             if let Some(tx_result) = managed_task.result_sender {
               if tx_result.send(execution_outcome).is_err() {
-                warn!(
+                trace!(
                   pool_name = %*pool_name_for_task_execution,
                   %task_id,
                   "Result receiver for task handle was dropped."

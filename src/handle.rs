@@ -1,8 +1,8 @@
 use crate::error::PoolError;
 use crate::task::TaskLabel;
+use fibre::oneshot;
 use std::collections::HashSet;
 use std::sync::Arc;
-use fibre::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing;
 
@@ -15,6 +15,7 @@ pub struct TaskHandle<R: Send + 'static> {
   pub(crate) cancellation_token: CancellationToken,
   pub(crate) result_receiver: Option<oneshot::Receiver<Result<R, PoolError>>>,
   pub(crate) labels: Arc<HashSet<TaskLabel>>,
+  pub(crate) is_detached: bool,
 }
 
 impl<R: Send + 'static> TaskHandle<R> {
@@ -38,6 +39,21 @@ impl<R: Send + 'static> TaskHandle<R> {
   pub fn cancel(&self) {
     tracing::debug!(task_id = %self.task_id, "TaskHandle: Cancellation requested.");
     self.cancellation_token.cancel();
+  }
+
+  /// Detaches the task, allowing it to run to completion in the background.
+  ///
+  /// This method consumes the handle and prevents the task from being cancelled
+  /// when the handle is dropped. Use this for "fire-and-forget" tasks where you
+  /// do not need to await the result.
+  ///
+  /// After calling `forget()`, `await_result()` can no longer be used.
+  pub fn detach(mut self) {
+    self.is_detached = true;
+    // By taking the receiver, we signal that we are no longer awaiting the result.
+    // This will prevent the Drop implementation from cancelling the task.
+    self.result_receiver.take();
+    tracing::trace!(task_id = %self.task_id, "TaskHandle: Task detached.");
   }
 
   /// Awaits the completion of the task and returns its result of type `R`.
