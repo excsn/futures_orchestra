@@ -2,22 +2,20 @@ use futures_intrusive::sync::{GenericSemaphoreReleaser, Semaphore};
 use parking_lot::RawMutex;
 use std::{future::Future, sync::Arc};
 
-// New struct for the owned permit. It holds an Arc to the gate,
-// making it 'static.
 #[derive(Debug)]
-pub(crate) struct OwnedPermitGuard {
-    gate: Arc<CapacityGate>,
+pub struct OwnedPermitGuard {
+  gate: Arc<CapacityGate>,
 }
 
 // When the owned guard is dropped, it releases the permit.
 impl Drop for OwnedPermitGuard {
-    fn drop(&mut self) {
-        self.gate.release();
-    }
+  fn drop(&mut self) {
+    self.gate.release();
+  }
 }
 
 #[derive(Debug)]
-pub(crate) struct CapacityGate {
+pub struct CapacityGate {
   capacity: usize,
   semaphore: Semaphore,
 }
@@ -37,8 +35,7 @@ impl CapacityGate {
     self.semaphore.acquire(1)
   }
 
-  /// NEW METHOD: Acquires an owned permit.
-  /// The returned future and the resulting guard are 'static.
+  /// Acquires an owned permit.
   pub fn acquire_owned(self: Arc<Self>) -> impl Future<Output = OwnedPermitGuard> {
     async move {
       // Await the underlying semaphore using a temporary borrow.
@@ -48,6 +45,11 @@ impl CapacityGate {
       // Return our new owned guard, which will release the permit on drop.
       OwnedPermitGuard { gate: self }
     }
+  }
+
+  /// Tries to acquire a permit without blocking.
+  pub fn try_acquire(&self) -> Option<PermitGuard<'_>> {
+    self.semaphore.try_acquire(1)
   }
 
   /// Releases a permit back to the gate.
@@ -102,7 +104,7 @@ mod tests {
     let gate = Arc::new(CapacityGate::new(CAPACITY));
     let mut handles = Vec::new();
 
-    for i in 0..NUM_TASKS {
+    for _i in 0..NUM_TASKS {
       let gate_clone = gate.clone();
       let task = async move {
         let _permit = gate_clone.acquire().await;

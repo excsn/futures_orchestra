@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dashmap::DashMap;
+use fibre::mpsc;
 use fibre::oneshot::oneshot;
 use futures::FutureExt;
 use tokio::runtime::Handle as TokioHandle;
@@ -74,7 +75,7 @@ pub struct FuturePoolManager<R: Send + 'static> {
   /// The decoupled notifier system for handling completion events.
   completion_notifier: Arc<CompletionNotifier>,
   /// A channel sender for the pool to send completion messages to the notifier.
-  internal_notification_tx: fibre::mpsc::AsyncSender<InternalCompletionMessage>,
+  internal_notification_tx: mpsc::UnboundedAsyncSender<InternalCompletionMessage>,
 }
 
 impl<R: Send + 'static> FuturePoolManager<R> {
@@ -425,7 +426,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
     tasks_tokio_handle: TokioHandle,
     active_task_info_map: Arc<DashMap<u64, (CancellationToken, Arc<HashSet<TaskLabel>>)>>,
     shutdown_token: CancellationToken,
-    notification_tx: fibre::mpsc::AsyncSender<InternalCompletionMessage>,
+    notification_tx: mpsc::UnboundedAsyncSender<InternalCompletionMessage>,
   ) {
     info!(name = %*pool_name, "Worker loop started.");
 

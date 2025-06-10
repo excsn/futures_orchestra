@@ -1,6 +1,6 @@
 use crate::error::PoolError;
 use crate::task::TaskLabel;
-use fibre::mpsc::{AsyncReceiver, RecvError};
+use fibre::mpsc::{UnboundedAsyncReceiver, RecvError};
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::{Arc, Mutex as StdMutex, Once, RwLock};
@@ -52,7 +52,7 @@ pub(crate) struct InternalCompletionMessage {
 // --- CompletionNotifier Struct ---
 
 struct NotifierInternalState {
-  internal_rx_for_init: Option<AsyncReceiver<InternalCompletionMessage>>,
+  internal_rx_for_init: Option<UnboundedAsyncReceiver<InternalCompletionMessage>>,
   tokio_handle: TokioHandle,
   pool_shutdown_token: CancellationToken,
   pool_name_for_logging: Arc<String>,
@@ -90,7 +90,7 @@ impl fmt::Debug for NotifierInternalState {
 
 impl CompletionNotifier {
   pub(crate) fn new(
-    internal_rx: AsyncReceiver<InternalCompletionMessage>,
+    internal_rx: UnboundedAsyncReceiver<InternalCompletionMessage>,
     tokio_handle: TokioHandle,
     pool_shutdown_token: CancellationToken,
     pool_name_for_logging: Arc<String>,
@@ -159,7 +159,7 @@ impl CompletionNotifier {
   /// - Panics within handlers are caught and logged, preventing them from crashing
   ///   the entire notification system.
   async fn run_notification_worker_loop(
-    queue_rx: AsyncReceiver<InternalCompletionMessage>,
+    queue_rx: UnboundedAsyncReceiver<InternalCompletionMessage>,
     handlers_list_arc: Arc<RwLock<Vec<Arc<dyn Fn(TaskCompletionInfo) + Send + Sync + 'static>>>>,
     pool_shutdown_token: CancellationToken,
   ) {

@@ -2,7 +2,7 @@ use crate::error::PoolError;
 use crate::capacity_gate::CapacityGate;
 use crate::task::ManagedTaskInternal;
 
-use fibre::mpsc::{self, AsyncReceiver, AsyncSender, RecvError};
+use fibre::mpsc::{self, UnboundedAsyncReceiver, UnboundedAsyncSender, RecvError};
 use std::fmt;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -49,8 +49,8 @@ impl Drop for Permit {
 /// task submission without using any locks in the hot path.
 #[derive(Debug)]
 pub(crate) struct TaskQueue<R: Send + 'static> {
-  tx: AsyncSender<QueueMessage<R>>,
-  rx: AsyncReceiver<QueueMessage<R>>,
+  tx: UnboundedAsyncSender<QueueMessage<R>>,
+  rx: UnboundedAsyncReceiver<QueueMessage<R>>,
   gate: Arc<CapacityGate>,
 }
 
@@ -81,7 +81,7 @@ impl<R: Send + 'static> TaskQueue<R> {
 /// multiple submission sites.
 #[derive(Clone)]
 pub(crate) struct QueueProducer<R: Send + 'static> {
-  tx: AsyncSender<QueueMessage<R>>,
+  tx: UnboundedAsyncSender<QueueMessage<R>>,
   gate: Arc<CapacityGate>,
 }
 
@@ -89,7 +89,7 @@ pub(crate) struct QueueProducer<R: Send + 'static> {
 /// the single-consumer pattern.
 #[derive(Debug)]
 pub(crate) struct QueueConsumer<R: Send + 'static> {
-  rx: AsyncReceiver<QueueMessage<R>>,
+  rx: UnboundedAsyncReceiver<QueueMessage<R>>,
 }
 
 impl<R: Send + 'static> fmt::Debug for QueueProducer<R> {
