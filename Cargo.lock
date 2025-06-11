@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "futures_orchestra"
-version = "1.1.5"
+version = "1.1.6"
 dependencies = [
  "dashmap",
  "fibre",

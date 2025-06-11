@@ -75,7 +75,7 @@ pub struct FuturePoolManager<R: Send + 'static> {
   /// The decoupled notifier system for handling completion events.
   completion_notifier: Arc<CompletionNotifier>,
   /// A channel sender for the pool to send completion messages to the notifier.
-  internal_notification_tx: mpsc::UnboundedAsyncSender<InternalCompletionMessage>,
+  internal_notification_tx: Arc<mpsc::UnboundedAsyncSender<InternalCompletionMessage>>,
 }
 
 impl<R: Send + 'static> FuturePoolManager<R> {
@@ -118,7 +118,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
       worker_join_handle_internal: worker_join_handle_internal_arc.clone(),
       next_task_id: Arc::new(AtomicU64::new(0)),
       completion_notifier: notifier_arc,
-      internal_notification_tx: internal_noti_tx_for_fpm,
+      internal_notification_tx: Arc::new(internal_noti_tx_for_fpm),
     };
 
     let worker_pool_name = manager.pool_name.clone();
@@ -137,7 +137,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
           worker_tokio_handle,
           worker_active_task_info,
           worker_shutdown_token,
-          worker_notification_tx,
+          (*worker_notification_tx).clone(),
         )
         .await;
       }
@@ -430,6 +430,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
   ) {
     info!(name = %*pool_name, "Worker loop started.");
 
+    let notification_tx_for_spawned_task = Arc::new(notification_tx);
     loop {
       let concurrency_permit = tokio::select! {
           biased;
@@ -483,7 +484,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
             labels: Arc::new(managed_task.labels),
             status: TaskCompletionStatus::Cancelled,
           };
-          if notification_tx.send(completion_msg).await.is_err() {
+          if notification_tx_for_spawned_task.send(completion_msg).await.is_err() {
             error!(
               pool_name = %*pool_name,
               "Failed to send completion for pre-cancelled task."
@@ -501,11 +502,13 @@ impl<R: Send + 'static> FuturePoolManager<R> {
           (task_specific_token.clone(), task_labels_for_active_map.clone()),
         );
 
-        let notification_tx_for_spawned_task = notification_tx.clone();
         let pool_name_for_notification = pool_name.clone();
         let pool_name_for_task_execution = pool_name.clone();
 
         tasks_tokio_handle.spawn({
+          
+          let notification_tx_for_spawned_task = notification_tx_for_spawned_task.clone();
+          
           async move {
             let _permit_guard = concurrency_permit; // Permit held for task duration
             let execution_outcome: Result<R, PoolError> = tokio::select! {
@@ -558,6 +561,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
               status: completion_status,
             };
 
+            
             if notification_tx_for_spawned_task.send(completion_msg).await.is_err() {
               error!(
                 pool_name = %*pool_name_for_task_execution,
