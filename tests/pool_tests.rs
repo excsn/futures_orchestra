@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -533,4 +534,116 @@ async fn test_concurrency_limit_and_queuing() {
 
   manager.shutdown(ShutdownMode::Graceful).await.unwrap();
   tracing::info!("Finished test: {}", pool_name);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_submit_race_with_shutdown() {
+  setup_tracing_for_test();
+  let pool_name = "test_pool_submit_race";
+  tracing::info!("Starting test: {}", pool_name);
+  let manager = FuturePoolManager::<String>::new(2, 10, tokio::runtime::Handle::current(), pool_name);
+
+  // Use tokio::sync::Mutex for shared state.
+  let submission_results = Arc::new(Mutex::new(Vec::<Result<String, PoolError>>::new()));
+  // Shared flag to signal the submitter task to stop.
+  let stop_submitter = Arc::new(AtomicBool::new(false));
+
+  let submitter_manager = manager.clone();
+  let submitter_results = submission_results.clone();
+  let submitter_stop_signal = stop_submitter.clone();
+
+  // Spawn a task that continuously tries to submit work.
+  let submitter_handle = tokio::spawn(async move {
+    let mut task_counter: u64 = 0;
+    loop {
+      if submitter_stop_signal.load(Ordering::Relaxed) {
+        tracing::info!("Submitter loop: Stop signal received. Exiting.");
+        break;
+      }
+
+      task_counter += 1;
+      let task_future = create_task(
+        task_counter as usize,
+        20, // Short duration
+        format!("task_{}", task_counter),
+        false,
+        None,
+        None,
+      );
+
+      let res = submitter_manager.submit(HashSet::new(), task_future).await;
+
+      // Asynchronously acquire the lock. If another task holds it, this will yield
+      // to the scheduler instead of blocking the thread.
+      let mut results_guard = submitter_results.lock().await; // <--- Changed to .await
+      match res {
+        Ok(handle) => {
+          handle.detach();
+          results_guard.push(Ok(format!("task_{}", task_counter)));
+        }
+        Err(e) => {
+          results_guard.push(Err(e));
+        }
+      }
+      // The lock is released when results_guard is dropped here.
+      drop(results_guard);
+
+      sleep(Duration::from_millis(1)).await;
+    }
+  });
+
+  // Let the submitter run for a bit to get some tasks in successfully.
+  sleep(Duration::from_millis(50)).await;
+
+  // Now, initiate shutdown while the submitter is still running.
+  tracing::info!("Main test thread: Initiating graceful shutdown.");
+  manager.shutdown(ShutdownMode::Graceful).await.unwrap();
+  tracing::info!("Main test thread: Shutdown complete.");
+
+  // Signal the submitter task to stop and wait for it to finish.
+  stop_submitter.store(true, Ordering::Relaxed);
+  submitter_handle.await.unwrap();
+
+  // --- Assertions ---
+  let final_results = submission_results.lock().await;
+  tracing::info!("Total submissions attempted: {}", final_results.len());
+
+  assert!(
+    !final_results.is_empty(),
+    "Submitter should have attempted at least one submission."
+  );
+
+  // Find the index of the first submission that failed due to shutdown.
+  let first_shutdown_error_idx = final_results
+    .iter()
+    .position(|r| matches!(r, Err(PoolError::PoolShuttingDown)));
+
+  // We must have seen at least one successful submission before shutdown.
+  assert!(
+    final_results.iter().any(|r| r.is_ok()),
+    "Test timing issue: No successful submissions were made before shutdown."
+  );
+
+  // We must have seen at least one error due to shutdown.
+  assert!(
+    first_shutdown_error_idx.is_some(),
+    "Submitter did not encounter a PoolShuttingDown error. The race was not tested effectively."
+  );
+
+  let first_err_idx = first_shutdown_error_idx.unwrap();
+  tracing::info!("First PoolShuttingDown error found at index: {}", first_err_idx);
+
+  // CRITICAL: Verify that no successful submissions occurred *after* the first shutdown error.
+  for (i, result) in final_results.iter().enumerate() {
+    if i >= first_err_idx {
+      assert!(
+        matches!(result, Err(PoolError::PoolShuttingDown)),
+        "Found a successful submission at index {} which is after or at the first shutdown error at index {}. This indicates a race condition!",
+        i,
+        first_err_idx
+      );
+    }
+  }
+
+  tracing::info!("Finished test: {}. Assertions passed.", pool_name);
 }
