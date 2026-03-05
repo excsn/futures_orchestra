@@ -6,6 +6,10 @@
 
 `futures_orchestra` is a Tokio-based pool for managing concurrent execution of futures. It provides a robust solution for controlling the concurrency of asynchronous tasks, offering queuing, labeling for bulk operations, cooperative cancellation, and detailed completion notifications. This library helps in scenarios where you need to limit the number of simultaneously running futures, manage task lifecycles, observe task outcomes, and organize tasks for targeted actions like cancellation.
 
+## Notable Users
+
+[Hi Stakes Markets Game](https://www.histakesgame.com) -  The worlds most advanced financial simulator, available on iPhone and Android.
+
 ## Key Features
 
 ### Concurrency Limiting
