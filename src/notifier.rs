@@ -161,7 +161,7 @@ impl CompletionNotifier {
   /// - Panics within handlers are caught and logged, preventing them from crashing
   ///   the entire notification system.
   async fn run_notification_worker_loop(
-    queue_rx: UnboundedAsyncReceiver<InternalCompletionMessage>,
+    mut queue_rx: UnboundedAsyncReceiver<InternalCompletionMessage>,
     handlers_list_arc: Arc<RwLock<Vec<Arc<dyn Fn(TaskCompletionInfo) + Send + Sync + 'static>>>>,
     pool_shutdown_token: CancellationToken,
   ) {

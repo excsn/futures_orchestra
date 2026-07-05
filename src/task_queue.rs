@@ -141,8 +141,10 @@ impl<R: Send + 'static> QueueProducer<R> {
       _permit: long_lived_permit,
     };
 
-    // Try to send the message.
-    if self.tx.send(message).await.is_ok() {
+    // Try to send the message. `fibre`'s async sender takes `&mut self`, so we
+    // clone a cheap per-call sender handle (the queue is shared via `&self`).
+    let mut tx = self.tx.clone();
+    if tx.send(message).await.is_ok() {
       // SUCCESS: The message is now in the queue. The `long_lived_permit` inside
       // it is now responsible for releasing the gate slot. We must prevent the
       // `temp_permit_guard` from also releasing it when it goes out of scope.
@@ -158,7 +160,7 @@ impl<R: Send + 'static> QueueProducer<R> {
   }
 
   /// Closes the sending side of the queue.
-  pub(crate) fn close(&self) {
+  pub(crate) fn close(&mut self) {
     let _ = self.tx.close();
   }
 
@@ -178,7 +180,7 @@ impl<R: Send + 'static> QueueConsumer<R> {
   ///
   /// The `_permit` inside the received `QueueMessage` is dropped upon successful
   /// receive, automatically calling `gate.release()` and freeing a slot.
-  pub(crate) async fn recv(&self) -> Result<ManagedTaskInternal<R>, RecvError> {
+  pub(crate) async fn recv(&mut self) -> Result<ManagedTaskInternal<R>, RecvError> {
     match self.rx.recv().await {
       Ok(message) => Ok(message.task),
       Err(e) => Err(e),
@@ -211,7 +213,7 @@ mod tests {
   #[tokio::test]
   async fn test_queue_send_recv() {
     let queue = TaskQueue::<String>::new(5);
-    let (producer, consumer) = queue.split();
+    let (producer, mut consumer) = queue.split();
     let shutdown_token = CancellationToken::new();
 
     assert_eq!(producer.gate.get_permits(), 5);
@@ -228,7 +230,7 @@ mod tests {
   #[tokio::test]
   async fn test_queue_capacity_blocks_send() {
     let queue = TaskQueue::<String>::new(1);
-    let (producer, consumer) = queue.split();
+    let (producer, mut consumer) = queue.split();
     let shutdown_token = CancellationToken::new();
 
     // Send one task, filling the queue capacity
@@ -265,7 +267,7 @@ mod tests {
   #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
   async fn test_queue_concurrent_sends() {
     let queue = TaskQueue::<String>::new(4);
-    let (producer, consumer) = queue.split();
+    let (producer, mut consumer) = queue.split();
     let shutdown_token = CancellationToken::new();
     let num_tasks: u64 = 20;
     let received_count = Arc::new(AtomicUsize::new(0));
@@ -326,7 +328,7 @@ mod tests {
   #[tokio::test]
   async fn test_close_sender_stops_consumer() {
     let queue = TaskQueue::<String>::new(2);
-    let (producer, consumer) = queue.split();
+    let (mut producer, mut consumer) = queue.split();
     let shutdown_token = CancellationToken::new();
 
     producer.send(dummy_task(1), &shutdown_token).await.unwrap();

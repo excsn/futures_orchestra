@@ -1,6 +1,6 @@
-use futures_orchestra::{FuturePoolManager, PoolError, ShutdownMode, TaskToExecute};
+use futures_orchestra::{FuturePoolManager, PoolError, ShutdownMode, TaskCompletionInfo, TaskToExecute};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -646,4 +646,161 @@ async fn test_submit_race_with_shutdown() {
   }
 
   tracing::info!("Finished test: {}. Assertions passed.", pool_name);
+}
+
+// Each cloned `FuturePoolManager` holds its *own* real completion sender and `QueueProducer::send` clones a sender per call. This
+// test submits concurrently from several distinct manager clones and verifies
+// (a) every task completes, and (b) every completion — including those from
+// cloned managers — reaches a single handler registered on the original manager,
+// i.e. all the per-clone senders feed the one notifier channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_concurrent_submit_from_cloned_managers_notifies_all() {
+  setup_tracing_for_test();
+  let pool_name = "test_cloned_manager_submits";
+  tracing::info!("Starting test: {}", pool_name);
+
+  let manager = FuturePoolManager::<String>::new(4, 64, tokio::runtime::Handle::current(), pool_name);
+
+  // Handler registered on the ORIGINAL manager; counts all notifications.
+  let notified_count = Arc::new(AtomicUsize::new(0));
+  {
+    let notified_count = notified_count.clone();
+    manager.add_completion_handler(move |_info: TaskCompletionInfo| {
+      notified_count.fetch_add(1, Ordering::SeqCst);
+    });
+  }
+
+  const NUM_CLONES: usize = 4;
+  const TASKS_PER_CLONE: usize = 10;
+  const TOTAL: usize = NUM_CLONES * TASKS_PER_CLONE;
+
+  let mut submitter_handles = Vec::new();
+  for c in 0..NUM_CLONES {
+    let manager_clone = manager.clone();
+    submitter_handles.push(tokio::spawn(async move {
+      let mut task_handles = Vec::new();
+      for t in 0..TASKS_PER_CLONE {
+        let id = c * TASKS_PER_CLONE + t;
+        let fut = create_task(id, 10, format!("val_{}", id), false, None, None);
+        let handle = manager_clone.submit(HashSet::new(), fut).await.unwrap();
+        task_handles.push((id, handle));
+      }
+      for (id, handle) in task_handles {
+        assert_eq!(handle.await_result().await, Ok(format!("val_{}", id)));
+      }
+    }));
+  }
+
+  for h in submitter_handles {
+    h.await.unwrap();
+  }
+
+  // Notifications are delivered asynchronously by the notifier worker; poll briefly.
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+  while notified_count.load(Ordering::SeqCst) < TOTAL && tokio::time::Instant::now() < deadline {
+    sleep(Duration::from_millis(10)).await;
+  }
+
+  assert_eq!(
+    notified_count.load(Ordering::SeqCst),
+    TOTAL,
+    "Every completion from all cloned managers should reach the single handler."
+  );
+
+  manager.shutdown(ShutdownMode::Graceful).await.unwrap();
+  tracing::info!("Finished test: {}. Assertions passed.", pool_name);
+}
+
+// A detached (fire-and-forget) handle drops the result receiver, so the worker's
+// result-send fails gracefully. The task must nonetheless run to completion and
+// still fire its completion notification. Exercises the "result receiver was
+// dropped" branch in `run_worker_loop`.
+#[tokio::test]
+async fn test_detached_handle_runs_to_completion_and_notifies() {
+  setup_tracing_for_test();
+  let pool_name = "test_detached_handle";
+  tracing::info!("Starting test: {}", pool_name);
+  let manager = FuturePoolManager::<String>::new(2, 5, tokio::runtime::Handle::current(), pool_name);
+
+  let notified_count = Arc::new(AtomicUsize::new(0));
+  {
+    let notified_count = notified_count.clone();
+    manager.add_completion_handler(move |_info: TaskCompletionInfo| {
+      notified_count.fetch_add(1, Ordering::SeqCst);
+    });
+  }
+
+  let completed_flag = Arc::new(AtomicBool::new(false));
+  let task_future = create_task(1, 50, "detached_done".to_string(), false, None, Some(completed_flag.clone()));
+  let handle = manager.submit(HashSet::new(), task_future).await.unwrap();
+
+  // Fire-and-forget: drop the result receiver via detach().
+  handle.detach();
+
+  // Wait for the task to finish and the notification to be delivered.
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+  while notified_count.load(Ordering::SeqCst) < 1 && tokio::time::Instant::now() < deadline {
+    sleep(Duration::from_millis(10)).await;
+  }
+
+  assert!(
+    completed_flag.load(Ordering::SeqCst),
+    "Detached task should still run to completion."
+  );
+  assert_eq!(
+    notified_count.load(Ordering::SeqCst),
+    1,
+    "Detached task should still fire a completion notification."
+  );
+
+  manager.shutdown(ShutdownMode::Graceful).await.unwrap();
+  tracing::info!("Finished test: {}", pool_name);
+}
+
+// Shutdown is initiated once and is idempotent: subsequent shutdown calls (from
+// other clones, in either mode) observe the already-in-progress shutdown and
+// return Ok without hanging. Exercises the `already_initiating_shutdown` branch.
+#[tokio::test]
+async fn test_double_shutdown_is_idempotent() {
+  setup_tracing_for_test();
+  let pool_name = "test_double_shutdown";
+  tracing::info!("Starting test: {}", pool_name);
+  let manager = FuturePoolManager::<String>::new(2, 5, tokio::runtime::Handle::current(), pool_name);
+
+  let task_future = create_task(1, 50, "task_done".to_string(), false, None, None);
+  let handle = manager.submit(HashSet::new(), task_future).await.unwrap();
+  assert_eq!(handle.await_result().await, Ok("task_done".to_string()));
+
+  // First shutdown on a clone; the original manager (and other clones) still exist.
+  manager.clone().shutdown(ShutdownMode::Graceful).await.unwrap();
+
+  // Second shutdown must see the in-progress/complete shutdown and return Ok cleanly.
+  manager.clone().shutdown(ShutdownMode::Graceful).await.unwrap();
+
+  // A forceful shutdown on the already-shut-down pool should also be a clean no-op.
+  manager.shutdown(ShutdownMode::ForcefulCancel).await.unwrap();
+
+  tracing::info!("Finished test: {}", pool_name);
+}
+
+// The pool is generic over the result type; every other test uses `String`. This
+// guards against the generics accidentally coupling to `String` or requiring
+// `R: Clone` by driving a task whose output is a non-`Clone`, non-`String` type.
+#[tokio::test]
+async fn test_pool_supports_non_string_result_type() {
+  setup_tracing_for_test();
+  let pool_name = "test_non_string_result";
+  tracing::info!("Starting test: {}", pool_name);
+
+  #[derive(Debug, PartialEq)]
+  struct Output(u64);
+
+  let manager = FuturePoolManager::<Output>::new(2, 5, tokio::runtime::Handle::current(), pool_name);
+
+  let fut: TaskToExecute<Output> = Box::pin(async { Output(42) });
+  let handle = manager.submit(HashSet::new(), fut).await.unwrap();
+  assert_eq!(handle.await_result().await, Ok(Output(42)));
+
+  manager.shutdown(ShutdownMode::Graceful).await.unwrap();
+  tracing::info!("Finished test: {}", pool_name);
 }
