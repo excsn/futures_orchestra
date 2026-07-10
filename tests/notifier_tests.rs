@@ -1,6 +1,6 @@
 use futures_orchestra::{
-  FuturePoolManager, PoolError, ShutdownMode, TaskCompletionInfo, TaskCompletionStatus, TaskHandle,
-  TaskLabel, TaskToExecute,
+  FuturePoolManager, PoolError, ShutdownMode, TaskCompletionInfo, TaskCompletionStatus, TaskHandle, TaskLabel,
+  TaskToExecute,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering}; // Removed AtomicUsize as it's not used in these tests directly
@@ -44,16 +44,18 @@ fn create_task(
     // Handle remaining duration if duration_ms is not a multiple of check_interval_ms
     let remaining_ms = duration_ms % check_interval_ms;
     if remaining_ms > 0 && !internal_token.is_cancelled() {
-        sleep(Duration::from_millis(remaining_ms)).await;
+      sleep(Duration::from_millis(remaining_ms)).await;
     }
-
 
     if should_panic {
       tracing::info!(
         "Task {} (notifier test context) panicking as requested.",
         task_id_for_log
       );
-      panic!("Task {} (notifier test context) intentionally panicked!", task_id_for_log);
+      panic!(
+        "Task {} (notifier test context) intentionally panicked!",
+        task_id_for_log
+      );
     }
 
     if let Some(flag) = completion_flag {
@@ -70,12 +72,11 @@ fn create_task(
 // Helper to initialize tracing for tests
 fn setup_tracing_for_test() {
   use std::sync::Once;
-  use tracing_subscriber::{fmt, util::SubscriberInitExt, EnvFilter};
+  use tracing_subscriber::{EnvFilter, fmt, util::SubscriberInitExt};
   static TRACING_INIT: Once = Once::new();
 
   TRACING_INIT.call_once(|| {
-    let filter = EnvFilter::try_from_default_env()
-      .unwrap_or_else(|_| EnvFilter::new("info,futures_orchestra=trace")); // Default if RUST_LOG not set
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,futures_orchestra=trace")); // Default if RUST_LOG not set
     fmt::Subscriber::builder()
       .with_env_filter(filter)
       .with_test_writer() // Suitable for `cargo test`
@@ -108,8 +109,7 @@ async fn test_completion_notifier_success() {
   setup_tracing_for_test();
   let pool_name = "test_notifier_success";
   tracing::info!("Starting test: {}", pool_name);
-  let manager =
-    FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
+  let manager = FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
   let (notifications, handler) = create_collecting_handler();
   manager.add_completion_handler(handler);
 
@@ -139,8 +139,7 @@ async fn test_completion_notifier_panic() {
   setup_tracing_for_test();
   let pool_name = "test_notifier_panic";
   tracing::info!("Starting test: {}", pool_name);
-  let manager =
-    FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
+  let manager = FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
   let (notifications, handler) = create_collecting_handler();
   manager.add_completion_handler(handler);
 
@@ -171,8 +170,7 @@ async fn test_completion_notifier_cancelled_by_handle() {
   setup_tracing_for_test();
   let pool_name = "test_notifier_cancel_handle";
   tracing::info!("Starting test: {}", pool_name);
-  let manager =
-    FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
+  let manager = FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
   let (notifications, handler) = create_collecting_handler();
   manager.add_completion_handler(handler);
 
@@ -206,8 +204,7 @@ async fn test_completion_notifier_cancelled_by_label() {
   setup_tracing_for_test();
   let pool_name = "test_notifier_cancel_label";
   tracing::info!("Starting test: {}", pool_name);
-  let manager =
-    FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
+  let manager = FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
   let (notifications, handler) = create_collecting_handler();
   manager.add_completion_handler(handler);
 
@@ -242,8 +239,7 @@ async fn test_completion_notifier_task_dequeued_but_pre_cancelled() {
   setup_tracing_for_test();
   let pool_name = "test_notifier_pre_cancelled_dequeued";
   tracing::info!("Starting test: {}", pool_name);
-  let manager =
-    FuturePoolManager::<String>::new(1, 5, TokioHandle::current(), pool_name); // Concurrency 1
+  let manager = FuturePoolManager::<String>::new(1, 5, TokioHandle::current(), pool_name); // Concurrency 1
   let (notifications, handler) = create_collecting_handler();
   manager.add_completion_handler(handler);
 
@@ -282,14 +278,13 @@ async fn test_completion_notifier_task_dequeued_but_pre_cancelled() {
   assert_eq!(info_a.status, TaskCompletionStatus::Success);
   assert_eq!(*info_a.labels, task_a_labels);
 
-
   let info_b = notifs
     .iter()
     .find(|n| n.task_id == task_b_id)
     .expect("Notification for task B not found");
   assert_eq!(info_b.status, TaskCompletionStatus::Cancelled);
   assert_eq!(*info_b.labels, labels_b);
-  
+
   tracing::info!("Finished test: {}", pool_name);
 }
 
@@ -298,8 +293,7 @@ async fn test_completion_notifier_multiple_handlers() {
   setup_tracing_for_test();
   let pool_name = "test_notifier_multi_handler";
   tracing::info!("Starting test: {}", pool_name);
-  let manager =
-    FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
+  let manager = FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
 
   let (notifications1, handler1) = create_collecting_handler();
   let (notifications2, handler2) = create_collecting_handler();
@@ -331,8 +325,7 @@ async fn test_completion_notifier_handler_panics() {
   setup_tracing_for_test();
   let pool_name = "test_notifier_handler_panic";
   tracing::info!("Starting test: {}", pool_name);
-  let manager =
-    FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
+  let manager = FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
 
   let (notifications_collect, collecting_handler) = create_collecting_handler();
   let panicking_handler = |_info: TaskCompletionInfo| {
@@ -351,7 +344,11 @@ async fn test_completion_notifier_handler_panics() {
   manager.shutdown(ShutdownMode::Graceful).await.unwrap();
 
   let collected = notifications_collect.lock().unwrap();
-  assert_eq!(collected.len(), 1, "Collecting handler should still have received the notification.");
+  assert_eq!(
+    collected.len(),
+    1,
+    "Collecting handler should still have received the notification."
+  );
   assert_eq!(collected[0].task_id, task_id);
   assert_eq!(collected[0].status, TaskCompletionStatus::Success);
   // Also, check logs for the panic from the other handler (manual step or advanced logging capture)
@@ -363,8 +360,7 @@ async fn test_completion_notifier_during_graceful_shutdown() {
   setup_tracing_for_test();
   let pool_name = "test_notifier_graceful_shutdown";
   tracing::info!("Starting test: {}", pool_name);
-  let manager =
-    FuturePoolManager::<String>::new(1, 5, TokioHandle::current(), pool_name); // Concurrency 1
+  let manager = FuturePoolManager::<String>::new(1, 5, TokioHandle::current(), pool_name); // Concurrency 1
   let (notifications, handler) = create_collecting_handler();
   manager.add_completion_handler(handler);
 
@@ -388,7 +384,10 @@ async fn test_completion_notifier_during_graceful_shutdown() {
   assert_eq!(handle_a.await_result().await, Ok("task_a_graceful".to_string()));
   match handle_b.await_result().await {
     Err(PoolError::ResultChannelError(_)) | Err(PoolError::TaskCancelled) => {} // Expected for unstarted queued task
-    res => panic!("Task B (queued): Expected ResultChannelError or TaskCancelled, got {:?}", res),
+    res => panic!(
+      "Task B (queued): Expected ResultChannelError or TaskCancelled, got {:?}",
+      res
+    ),
   }
 
   // Check notifications
@@ -404,8 +403,7 @@ async fn test_completion_notifier_during_forceful_shutdown() {
   setup_tracing_for_test();
   let pool_name = "test_notifier_forceful_shutdown";
   tracing::info!("Starting test: {}", pool_name);
-  let manager =
-    FuturePoolManager::<String>::new(1, 5, TokioHandle::current(), pool_name); // Concurrency 1
+  let manager = FuturePoolManager::<String>::new(1, 5, TokioHandle::current(), pool_name); // Concurrency 1
   let (notifications, handler) = create_collecting_handler();
   manager.add_completion_handler(handler);
 
@@ -431,7 +429,10 @@ async fn test_completion_notifier_during_forceful_shutdown() {
   }
   match handle_b.await_result().await {
     Err(PoolError::ResultChannelError(_)) | Err(PoolError::TaskCancelled) => {} // Expected for unstarted queued task
-    res => panic!("Task B (queued): Expected ResultChannelError or TaskCancelled, got {:?}", res),
+    res => panic!(
+      "Task B (queued): Expected ResultChannelError or TaskCancelled, got {:?}",
+      res
+    ),
   }
 
   // Check notifications
@@ -447,8 +448,7 @@ async fn test_completion_notifier_no_handlers_added() {
   setup_tracing_for_test();
   let pool_name = "test_notifier_no_handlers";
   tracing::info!("Starting test: {}", pool_name);
-  let manager =
-    FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
+  let manager = FuturePoolManager::<String>::new(1, 1, TokioHandle::current(), pool_name);
   // No handlers added
 
   let task_future = create_task(100, 50, "no_handler_val".to_string(), false, None, None);
@@ -468,10 +468,7 @@ async fn test_completion_notifier_pool_name_and_labels_in_info() {
   let (notifications, handler) = create_collecting_handler();
   manager.add_completion_handler(handler);
 
-  let expected_labels = HashSet::from_iter([
-    "detail_label_1".to_string(),
-    "detail_label_2".to_string(),
-  ]);
+  let expected_labels = HashSet::from_iter(["detail_label_1".to_string(), "detail_label_2".to_string()]);
 
   let task_future = create_task(110, 50, "details_val".to_string(), false, None, None);
   let handle = manager.submit(expected_labels.clone(), task_future).await.unwrap();
@@ -486,7 +483,48 @@ async fn test_completion_notifier_pool_name_and_labels_in_info() {
   let info = &notifs[0];
 
   assert_eq!(info.task_id, task_id);
-  assert_eq!(*info.pool_name, pool_name.to_string(), "Pool name in notification should match.");
+  assert_eq!(
+    *info.pool_name,
+    pool_name.to_string(),
+    "Pool name in notification should match."
+  );
   assert_eq!(*info.labels, expected_labels, "Labels in notification should match.");
   assert_eq!(info.status, TaskCompletionStatus::Success);
+}
+
+#[tokio::test]
+async fn test_shutdown_completes_while_other_pool_clone_alive() {
+  setup_tracing_for_test();
+  let pool_name = "test_shutdown_with_live_clone";
+  let manager = FuturePoolManager::<String>::new(1, 5, TokioHandle::current(), pool_name);
+
+  // Simulates xsmb's router: a clone that outlives shutdown() and keeps a
+  // notification sender open, so the queue never disconnects.
+  let _held_clone = manager.clone();
+
+  let (notifications, handler) = create_collecting_handler();
+  manager.add_completion_handler(handler);
+
+  let handle = manager
+    .submit(
+      HashSet::new(),
+      create_task(90, 50, "clone_held".to_string(), false, None, None),
+    )
+    .await
+    .unwrap();
+  let task_id = handle.id();
+  assert_eq!(handle.await_result().await, Ok("clone_held".to_string()));
+
+  // BUG: this used to hang forever in await_shutdown() because the notifier
+  // worker waited for queue disconnect, which _held_clone prevents.
+  tokio::time::timeout(Duration::from_secs(5), manager.shutdown(ShutdownMode::Graceful))
+    .await
+    .expect("shutdown() deadlocked while another pool clone was alive")
+    .unwrap();
+
+  // The completion that happened before shutdown must still be delivered.
+  let notifs = notifications.lock().unwrap();
+  assert_eq!(notifs.len(), 1);
+  assert_eq!(notifs[0].task_id, task_id);
+  assert_eq!(notifs[0].status, TaskCompletionStatus::Success);
 }

@@ -10,10 +10,11 @@ use crate::TaskCompletionInfo;
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use fibre::mpsc;
 use fibre::oneshot::oneshot;
 use futures::FutureExt;
@@ -74,8 +75,10 @@ pub struct FuturePoolManager<R: Send + 'static> {
   next_task_id: Arc<AtomicU64>,
   /// The decoupled notifier system for handling completion events.
   completion_notifier: Arc<CompletionNotifier>,
-  /// A channel sender for the pool to send completion messages to the notifier.
-  internal_notification_tx: mpsc::UnboundedAsyncSender<InternalCompletionMessage>,
+  /// The pool-wide sender for completion messages to the notifier. Shared by
+  /// all clones of the manager; the first shutdown (or last-clone drop) takes
+  /// and drops it so the notifier's queue can disconnect.
+  internal_notification_tx: Arc<Mutex<Option<mpsc::UnboundedAsyncSender<InternalCompletionMessage>>>>,
 }
 
 impl<R: Send + 'static> FuturePoolManager<R> {
@@ -100,6 +103,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
 
     let (internal_noti_tx_for_fpm, internal_notification_rx_for_notifier_worker) =
       fibre::mpsc::unbounded_async::<InternalCompletionMessage>();
+    let worker_notification_tx = internal_noti_tx_for_fpm.clone();
 
     let notifier_arc = CompletionNotifier::new(
       internal_notification_rx_for_notifier_worker,
@@ -118,7 +122,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
       worker_join_handle_internal: worker_join_handle_internal_arc.clone(),
       next_task_id: Arc::new(AtomicU64::new(0)),
       completion_notifier: notifier_arc,
-      internal_notification_tx: internal_noti_tx_for_fpm,
+      internal_notification_tx: Arc::new(Mutex::new(Some(internal_noti_tx_for_fpm))),
     };
 
     let worker_pool_name = manager.pool_name.clone();
@@ -126,7 +130,6 @@ impl<R: Send + 'static> FuturePoolManager<R> {
     let worker_active_task_info = manager.active_task_info.clone();
     let worker_tokio_handle = tokio_handle.clone();
     let worker_shutdown_token = shutdown_token.clone();
-    let worker_notification_tx = manager.internal_notification_tx.clone();
 
     let worker_loop_join_handle = worker_tokio_handle.clone().spawn(
       async move {
@@ -144,7 +147,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
       .instrument(info_span!("future_pool_worker_loop", name = %pool_name)),
     );
 
-    *worker_join_handle_internal_arc.lock().unwrap() = Some(worker_loop_join_handle);
+    *worker_join_handle_internal_arc.lock() = Some(worker_loop_join_handle);
 
     manager
   }
@@ -332,7 +335,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
     }
 
     let worker_handle_to_await: Option<JoinHandle<()>> = {
-      let mut guard = self.worker_join_handle_internal.lock().unwrap();
+      let mut guard = self.worker_join_handle_internal.lock();
       guard.take()
     };
 
@@ -363,20 +366,29 @@ impl<R: Send + 'static> FuturePoolManager<R> {
     if !already_initiating_shutdown {
       debug!(
         pool_name = %self.pool_name,
-        "Explicitly closing manager's internal notification sender before awaiting notifier."
+        "Dropping pool-wide notification sender before awaiting notifier."
       );
-      let _ = self.internal_notification_tx.close();
+      drop(self.internal_notification_tx.lock().take());
     }
 
     debug!(
       pool_name = %self.pool_name,
       "Waiting for completion notifier to shutdown."
     );
-    self.completion_notifier.await_shutdown().await;
-    info!(
-      pool_name = %self.pool_name,
-      "Completion notifier shutdown complete."
-    );
+    if timeout(Duration::from_secs(5), self.completion_notifier.await_shutdown())
+      .await
+      .is_err()
+    {
+      error!(
+        pool_name = %self.pool_name,
+        "Timeout waiting for completion notifier to shutdown."
+      );
+    } else {
+      info!(
+        pool_name = %self.pool_name,
+        "Completion notifier shutdown complete."
+      );
+    }
 
     if !already_initiating_shutdown {
       info!(
@@ -617,7 +629,7 @@ impl<R: Send + 'static> Drop for FuturePoolManager<R> {
       );
       self.shutdown_token.cancel();
       self.task_queue.close();
-      let _ = self.internal_notification_tx.close();
+      drop(self.internal_notification_tx.lock().take());
 
       debug!(
         pool_name = %*self.pool_name,
