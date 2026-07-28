@@ -1,6 +1,5 @@
 use futures_orchestra::{
-  FuturePoolManager, PoolError, ShutdownMode, TaskCompletionInfo, TaskCompletionStatus, TaskHandle, TaskLabel,
-  TaskToExecute,
+  FuturePoolManager, PoolError, ShutdownMode, TaskCompletionInfo, TaskCompletionStatus, TaskLabel, TaskToExecute,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering}; // Removed AtomicUsize as it's not used in these tests directly
@@ -9,7 +8,6 @@ use std::time::Duration;
 use tokio::runtime::Handle as TokioHandle; // Added for FuturePoolManager::new
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing; // For logging in tests
 
 // Helper to create a task future (copied from pool_tests.rs for standalone notifier tests)
 fn create_task(
@@ -21,7 +19,7 @@ fn create_task(
   completion_flag: Option<Arc<AtomicBool>>, // Kept for compatibility, though not always used here
 ) -> TaskToExecute<String> {
   Box::pin(async move {
-    let internal_token = task_internal_cancel_token.unwrap_or_else(CancellationToken::new);
+    let internal_token = task_internal_cancel_token.unwrap_or_default();
     let check_interval_ms = 10u64;
     let mut intervals_passed = 0u64;
 
@@ -72,7 +70,7 @@ fn create_task(
 // Helper to initialize tracing for tests
 fn setup_tracing_for_test() {
   use std::sync::Once;
-  use tracing_subscriber::{EnvFilter, fmt, util::SubscriberInitExt};
+  use tracing_subscriber::{EnvFilter, fmt};
   static TRACING_INIT: Once = Once::new();
 
   TRACING_INIT.call_once(|| {

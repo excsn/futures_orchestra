@@ -16,6 +16,7 @@ impl Drop for OwnedPermitGuard {
 
 #[derive(Debug)]
 pub struct CapacityGate {
+  #[allow(dead_code)]
   capacity: usize,
   semaphore: Semaphore,
 }
@@ -36,18 +37,16 @@ impl CapacityGate {
   }
 
   /// Acquires an owned permit.
-  pub fn acquire_owned(self: Arc<Self>) -> impl Future<Output = OwnedPermitGuard> {
-    async move {
-      // Await the underlying semaphore using a temporary borrow.
-      let _temporary_guard = self.semaphore.acquire(1).await;
-      // Forget the temporary guard so it doesn't release the permit.
-      std::mem::forget(_temporary_guard);
-      // Return our new owned guard, which will release the permit on drop.
-      OwnedPermitGuard { gate: self }
-    }
+  pub async fn acquire_owned(self: Arc<Self>) -> OwnedPermitGuard {
+    let temporary_guard = self.semaphore.acquire(1).await;
+    // Forgetting the releaser transfers the permit to `OwnedPermitGuard`, whose
+    // `Drop` releases it instead.
+    std::mem::forget(temporary_guard);
+    OwnedPermitGuard { gate: self }
   }
 
   /// Tries to acquire a permit without blocking.
+  #[allow(dead_code)]
   pub fn try_acquire(&self) -> Option<PermitGuard<'_>> {
     self.semaphore.try_acquire(1)
   }
@@ -66,6 +65,7 @@ impl CapacityGate {
   }
 
   /// Returns the total capacity of the gate.
+  #[allow(dead_code)]
   pub fn capacity(&self) -> usize {
     self.capacity
   }

@@ -206,6 +206,9 @@ A handle to a task submitted to the pool. `R` is the type of the successful resu
     *   Returns `Err(PoolError::ResultChannelError)` if the communication channel for the result was broken.
     *   Returns `Err(PoolError::ResultUnavailable)` if `await_result` has already been called.
 
+*   `pub fn detach(mut self)`
+    Consumes the `TaskHandle` and discards the task's result, leaving the task to run to completion in the background. Use it for "fire-and-forget" work. The task is otherwise unaffected: it still runs to completion and still fires any completion handlers registered on the pool. Dropping the handle has the same effect, so this method mainly serves to state the intent explicitly.
+
 ### Task Types
 
 *   `pub type TaskLabel = String;`

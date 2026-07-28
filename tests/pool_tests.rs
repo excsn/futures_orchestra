@@ -18,7 +18,7 @@ fn create_task(
   completion_flag: Option<Arc<AtomicBool>>, // External flag to verify completion
 ) -> TaskToExecute<String> {
   Box::pin(async move {
-    let internal_token = task_internal_cancel_token.unwrap_or_else(CancellationToken::new);
+    let internal_token = task_internal_cancel_token.unwrap_or_default();
 
     let check_interval_ms = 10u64;
     let mut intervals_passed = 0u64;
@@ -522,9 +522,8 @@ async fn test_concurrency_limit_and_queuing() {
     handle.await_result().await.unwrap();
   }
 
-  let final_order = completion_order.lock();
   assert_eq!(
-    *final_order,
+    *completion_order.lock(),
     vec![1, 2, 3],
     "Tasks should complete in submission order due to concurrency 1."
   );

@@ -1,6 +1,5 @@
 use futures_orchestra::{FuturePoolManager, PoolError, ShutdownMode, TaskHandle};
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Handle;
 use tracing::info;

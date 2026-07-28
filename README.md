@@ -44,7 +44,7 @@ Add `futures_orchestra` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-futures_orchestra = "1.0.0" # Replace with the latest version
+futures_orchestra = "1"
 ```
 
 This library relies on `tokio` for its asynchronous runtime. Ensure your project is set up to use Tokio.

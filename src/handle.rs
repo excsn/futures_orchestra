@@ -4,7 +4,6 @@ use fibre::oneshot;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing;
 
 /// A handle to a task submitted to the `FuturePoolManager`.
 ///
@@ -41,17 +40,15 @@ impl<R: Send + 'static> TaskHandle<R> {
     self.cancellation_token.cancel();
   }
 
-  /// Detaches the task, allowing it to run to completion in the background.
+  /// Consumes the handle, leaving the task to run to completion in the background.
   ///
-  /// This method consumes the handle and prevents the task from being cancelled
-  /// when the handle is dropped. Use this for "fire-and-forget" tasks where you
-  /// do not need to await the result.
-  ///
-  /// After calling `forget()`, `await_result()` can no longer be used.
+  /// Use this for "fire-and-forget" tasks. The task's result is discarded and can
+  /// no longer be awaited, but the task itself is unaffected: it still runs to
+  /// completion and still fires any completion handlers registered on the pool.
+  /// Simply dropping the handle has the same effect; this method states the intent
+  /// explicitly.
   pub fn detach(mut self) {
     self.is_detached = true;
-    // By taking the receiver, we signal that we are no longer awaiting the result.
-    // This will prevent the Drop implementation from cancelling the task.
     self.result_receiver.take();
     tracing::trace!(task_id = %self.task_id, "TaskHandle: Task detached.");
   }

@@ -61,8 +61,11 @@ struct NotifierInternalState {
   worker_join_handle: Option<JoinHandle<()>>,
 }
 
+type CompletionHandler = Arc<dyn Fn(TaskCompletionInfo) + Send + Sync + 'static>;
+type HandlerList = Arc<RwLock<Vec<CompletionHandler>>>;
+
 pub(crate) struct CompletionNotifier {
-  handlers: Arc<RwLock<Vec<Arc<dyn Fn(TaskCompletionInfo) + Send + Sync + 'static>>>>,
+  handlers: HandlerList,
   init_once: Once,
   internal_state_for_init: StdMutex<NotifierInternalState>,
 }
@@ -162,7 +165,7 @@ impl CompletionNotifier {
   ///   the entire notification system.
   async fn run_notification_worker_loop(
     mut queue_rx: UnboundedAsyncReceiver<InternalCompletionMessage>,
-    handlers_list_arc: Arc<RwLock<Vec<Arc<dyn Fn(TaskCompletionInfo) + Send + Sync + 'static>>>>,
+    handlers_list_arc: HandlerList,
     pool_shutdown_token: CancellationToken,
   ) {
     info!("Notification worker started. Will process messages until its input queue is closed.");
@@ -200,7 +203,7 @@ impl CompletionNotifier {
                     handler_arc(info_clone);
                 }));
 
-                if let Err(_) = result {
+                if result.is_err() {
                     error!(
                         pool_name = %public_info.pool_name,
                         task_id = %public_info.task_id,

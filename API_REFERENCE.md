@@ -132,6 +132,11 @@ A handle to a task submitted to the pool, allowing for interaction and result re
     ```
     Awaits the completion of the task and returns its result. This method consumes the handle and can only be called once.
 
+    ```rust
+    pub fn detach(mut self)
+    ```
+    Consumes the handle and discards the task's result, leaving the task to run to completion in the background. The task still runs and still fires completion handlers; only the ability to await its result is given up. Dropping the handle has the same effect.
+
 ---
 
 ### 3. Configuration & Shutdown

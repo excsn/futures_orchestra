@@ -7,14 +7,13 @@ use crate::task::{ManagedTaskInternal, TaskLabel, TaskToExecute};
 use crate::task_queue::{QueueConsumer, QueueProducer, TaskQueue};
 use crate::TaskCompletionInfo;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashmap::DashMap;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use fibre::mpsc;
 use fibre::oneshot::oneshot;
 use futures::FutureExt;
@@ -23,6 +22,9 @@ use tokio::time::timeout;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{self, debug, error, info, info_span, trace, warn, Instrument};
+
+/// Cancellation tokens and labels for the tasks currently executing, keyed by task id.
+type ActiveTaskInfo = Arc<RwLock<HashMap<u64, (CancellationToken, Arc<HashSet<TaskLabel>>)>>>;
 
 /// Defines how the `FuturePoolManager` should behave upon shutdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +68,7 @@ pub struct FuturePoolManager<R: Send + 'static> {
   /// The producer handle for the lock-free, bounded task queue.
   task_queue: QueueProducer<R>,
   /// A map holding cancellation tokens and labels for all *active* tasks.
-  active_task_info: Arc<DashMap<u64, (CancellationToken, Arc<HashSet<TaskLabel>>)>>,
+  active_task_info: ActiveTaskInfo,
   /// A token to signal a global shutdown to all pool components.
   shutdown_token: CancellationToken,
   /// A join handle for the main worker loop, used for graceful shutdown.
@@ -117,7 +119,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
       pool_name: pool_name_arc_for_components,
       concurrency_gate: Arc::new(CapacityGate::new(concurrency_limit.max(1))),
       task_queue: producer_queue,
-      active_task_info: Arc::new(DashMap::new()),
+      active_task_info: Arc::new(RwLock::new(HashMap::with_capacity(concurrency_limit.max(1)))),
       shutdown_token: shutdown_token.clone(),
       worker_join_handle_internal: worker_join_handle_internal_arc.clone(),
       next_task_id: Arc::new(AtomicU64::new(0)),
@@ -159,7 +161,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
 
   /// Returns the current number of tasks actively running.
   pub fn active_task_count(&self) -> usize {
-    self.active_task_info.len()
+    self.active_task_info.read().len()
   }
 
   /// Returns the approximate number of tasks waiting in the queue.
@@ -279,8 +281,9 @@ impl<R: Send + 'static> FuturePoolManager<R> {
         );
         let tasks_to_cancel: Vec<(u64, CancellationToken)> = self
           .active_task_info
+          .read()
           .iter()
-          .map(|entry| (*entry.key(), entry.value().0.clone()))
+          .map(|(task_id, (token, _))| (*task_id, token.clone()))
           .collect();
         if tasks_to_cancel.is_empty() {
           info!(
@@ -301,11 +304,12 @@ impl<R: Send + 'static> FuturePoolManager<R> {
       info!(pool_name = %self.pool_name, "Shutdown already in progress.");
     }
 
-    if !self.active_task_info.is_empty() {
+    let initially_active = self.active_task_info.read().len();
+    if initially_active > 0 {
       info!(
         pool_name = %self.pool_name,
         "Waiting for {} active task(s) to complete...",
-        self.active_task_info.len()
+        initially_active
       );
       let mut check_interval = tokio::time::interval(Duration::from_millis(50));
       let shutdown_wait_timeout = tokio::time::sleep(Duration::from_secs(30));
@@ -314,15 +318,17 @@ impl<R: Send + 'static> FuturePoolManager<R> {
       loop {
         tokio::select! {
             _ = &mut shutdown_wait_timeout => {
-                warn!(pool_name = %self.pool_name, "Timeout waiting for active tasks to complete during shutdown. {} tasks still active.", self.active_task_info.len());
+                let remaining = self.active_task_info.read().len();
+                warn!(pool_name = %self.pool_name, "Timeout waiting for active tasks to complete during shutdown. {} tasks still active.", remaining);
                 break;
             }
             _ = check_interval.tick() => {
-                if self.active_task_info.is_empty() {
+                let remaining = self.active_task_info.read().len();
+                if remaining == 0 {
                     info!(pool_name = %self.pool_name, "All active tasks have completed.");
                     break;
                 } else {
-                    trace!(pool_name = %self.pool_name, "Still waiting for {} active task(s)...", self.active_task_info.len());
+                    trace!(pool_name = %self.pool_name, "Still waiting for {} active task(s)...", remaining);
                 }
             }
         }
@@ -412,15 +418,20 @@ impl<R: Send + 'static> FuturePoolManager<R> {
       "Requesting cancellation for active tasks with labels: {:?}",
       labels_to_cancel
     );
-    for entry in self.active_task_info.iter() {
-      let (task_id, (token, task_labels)) = entry.pair();
-      if !task_labels.is_disjoint(labels_to_cancel) {
-        debug!(
-          pool_name = %self.pool_name, %task_id,
-          "Signaling cancellation for active task due to label match."
-        );
-        token.cancel();
-      }
+    let matched: Vec<(u64, CancellationToken)> = self
+      .active_task_info
+      .read()
+      .iter()
+      .filter(|(_, (_, task_labels))| !task_labels.is_disjoint(labels_to_cancel))
+      .map(|(task_id, (token, _))| (*task_id, token.clone()))
+      .collect();
+
+    for (task_id, token) in matched {
+      debug!(
+        pool_name = %self.pool_name, %task_id,
+        "Signaling cancellation for active task due to label match."
+      );
+      token.cancel();
     }
   }
 
@@ -436,7 +447,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
     concurrency_gate: Arc<CapacityGate>,
     mut task_queue: QueueConsumer<R>,
     tasks_tokio_handle: TokioHandle,
-    active_task_info_map: Arc<DashMap<u64, (CancellationToken, Arc<HashSet<TaskLabel>>)>>,
+    active_task_info_map: ActiveTaskInfo,
     shutdown_token: CancellationToken,
     notification_tx: mpsc::UnboundedAsyncSender<InternalCompletionMessage>,
   ) {
@@ -509,7 +520,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
         let task_labels_for_active_map = Arc::new(managed_task.labels.clone());
         let task_specific_token = managed_task.token.clone();
 
-        active_task_info_map.insert(
+        active_task_info_map.write().insert(
           task_id,
           (task_specific_token.clone(), task_labels_for_active_map.clone()),
         );
@@ -556,14 +567,14 @@ impl<R: Send + 'static> FuturePoolManager<R> {
             };
 
             let completion_status = TaskCompletionStatus::from(&execution_outcome);
-            if let Some(tx_result) = managed_task.result_sender {
-              if tx_result.send(execution_outcome).is_err() {
-                trace!(
-                  pool_name = %*pool_name_for_task_execution,
-                  %task_id,
-                  "Result receiver for task handle was dropped."
-                );
-              }
+            if let Some(tx_result) = managed_task.result_sender
+              && tx_result.send(execution_outcome).is_err()
+            {
+              trace!(
+                pool_name = %*pool_name_for_task_execution,
+                %task_id,
+                "Result receiver for task handle was dropped."
+              );
             }
 
             let completion_msg = InternalCompletionMessage {
@@ -587,7 +598,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
             let pool_name = pool_name.clone();
             let active_task_info_map = active_task_info_map.clone();
             move |_| {
-              active_task_info_map.remove(&task_id);
+              active_task_info_map.write().remove(&task_id);
               debug!(
                 name = %*pool_name,
                 %task_id,
