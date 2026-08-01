@@ -203,7 +203,7 @@ mod tests {
     let (tx, _) = exclusive();
     ManagedTaskInternal {
       task_id: id,
-      labels: HashSet::new(),
+      labels: Arc::new(HashSet::new()),
       future,
       token: CancellationToken::new(),
       result_sender: Some(tx),

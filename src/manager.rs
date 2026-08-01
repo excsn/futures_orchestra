@@ -202,7 +202,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
 
     let managed_task = ManagedTaskInternal {
       task_id,
-      labels: (*arc_labels).clone(),
+      labels: arc_labels.clone(),
       future: task_future,
       token: token.clone(),
       result_sender: Some(result_tx),
@@ -511,7 +511,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
             let completion_msg = InternalCompletionMessage {
               task_id: managed_task.task_id,
               pool_name: pool_name.clone(),
-              labels: Arc::new(managed_task.labels),
+              labels: managed_task.labels,
               status: TaskCompletionStatus::Cancelled,
             };
             if noti_tx.send(completion_msg).await.is_err() {
@@ -525,7 +525,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
         }
 
         let task_id = managed_task.task_id;
-        let task_labels_for_active_map = Arc::new(managed_task.labels.clone());
+        let task_labels_for_active_map = managed_task.labels.clone();
         let task_specific_token = managed_task.token.clone();
 
         active_task_info_map.write().insert(

@@ -42,16 +42,16 @@ The library defines a comprehensive `PoolError` enum, clearly indicating the sou
 
 *Pay the queuing tax that tokio doesn't.*
 
-Cost per task on an Apple M4 Pro (14 cores, rustc 1.94.1, fibre 0.6.3): 4-worker Tokio runtime, 1000 trivial tasks per iteration, concurrency limit 64, queue capacity 2048, criterion medians.
+Cost per task on an Apple M4 Pro (14 cores, rustc 1.94.1, fibre 0.6.3): default multi-threaded Tokio runtime, 1000 trivial tasks per iteration, concurrency limit 64, queue capacity 2048, criterion medians.
 
 | | per task | throughput |
 | --- | --- | --- |
-| `tokio::spawn` + `JoinSet` | 0.57 µs | 1.75 M/s |
-| `tokio::sync::Semaphore` + `tokio::spawn` | 0.61 µs | 1.63 M/s |
-| `FuturePoolManager` | 1.24 µs | 807 K/s |
-| `FuturePoolManager`, 3 labels per task | 1.93 µs | 518 K/s |
-| `FuturePoolManager`, one completion handler | 1.99 µs | 503 K/s |
-| `FuturePoolManager`, 3 labels and one handler | 2.09 µs | 477 K/s |
+| `tokio::spawn` + `JoinSet` | 0.54 µs | 1.85 M/s |
+| `tokio::sync::Semaphore` + `tokio::spawn` | 0.57 µs | 1.75 M/s |
+| `FuturePoolManager` | 1.19 µs | 841 K/s |
+| `FuturePoolManager`, one completion handler | 1.92 µs | 520 K/s |
+
+Labels are shared by `Arc` rather than cloned, so they add no measurable per-task cost: three labels measures 1.16 µs, within noise of the unlabelled 1.19 µs.
 
 Reproduce with `cargo bench`. Benches are in `benches/`, split into `tokio_baseline` and `orchestra`.
 

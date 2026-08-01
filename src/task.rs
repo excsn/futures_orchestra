@@ -3,6 +3,7 @@ use crate::error::PoolError;
 use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use fibre::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -17,7 +18,7 @@ pub type TaskToExecute<R> = Pin<Box<dyn Future<Output = R> + Send + 'static>>;
 /// Internal representation of a task managed by the pool.
 pub(crate) struct ManagedTaskInternal<R: Send + 'static> {
   pub(crate) task_id: u64,
-  pub(crate) labels: HashSet<TaskLabel>,
+  pub(crate) labels: Arc<HashSet<TaskLabel>>,
   pub(crate) future: TaskToExecute<R>,
   pub(crate) token: CancellationToken,
   pub(crate) result_sender: Option<oneshot::ExclusiveSender<Result<R, PoolError>>>,
