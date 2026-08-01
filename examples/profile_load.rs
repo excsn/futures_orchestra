@@ -30,22 +30,39 @@ async fn run(mode: &str, total: u64) -> f64 {
     _ => HashSet::new(),
   };
 
+  let submitters: u64 = std::env::var("FO_SUBMITTERS")
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(1);
+
   let started = Instant::now();
-  let mut done = 0u64;
-  while done < total {
-    let mut handles = Vec::with_capacity(BATCH as usize);
-    for i in 0..BATCH {
-      handles.push(
-        manager
-          .submit(task_labels.clone(), Box::pin(async move { black_box(i) }))
-          .await
-          .expect("submit failed"),
-      );
-    }
-    for handle in handles {
-      black_box(handle.await_result().await.expect("task failed"));
-      done += 1;
-    }
+  let mut submitter_tasks = Vec::new();
+  for _ in 0..submitters {
+    let manager = manager.clone();
+    let task_labels = task_labels.clone();
+    let share = total / submitters;
+    submitter_tasks.push(tokio::spawn(async move {
+      let mut done = 0u64;
+      while done < share {
+        let batch = BATCH.min(share - done);
+        let mut handles = Vec::with_capacity(batch as usize);
+        for i in 0..batch {
+          handles.push(
+            manager
+              .submit(task_labels.clone(), Box::pin(async move { black_box(i) }))
+              .await
+              .expect("submit failed"),
+          );
+        }
+        for handle in handles {
+          black_box(handle.await_result().await.expect("task failed"));
+          done += 1;
+        }
+      }
+    }));
+  }
+  for t in submitter_tasks {
+    t.await.unwrap();
   }
   let elapsed = started.elapsed();
 

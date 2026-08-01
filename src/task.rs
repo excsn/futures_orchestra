@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use fibre::oneshot;
-use tokio_util::sync::CancellationToken;
+use crate::token::CancellationToken;
 
 /// A descriptive label for a task, typically a `String`.
 pub type TaskLabel = String;

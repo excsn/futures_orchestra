@@ -10,7 +10,7 @@ use fibre::mpsc::{self, UnboundedAsyncReceiver, UnboundedAsyncSender, RecvError}
 use parking_lot::Mutex;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use crate::token::CancellationToken;
 use tracing::{debug, error, info, info_span, trace, Instrument};
 
 // --- Public Event Structs for Handlers ---

@@ -21,7 +21,7 @@ use futures::FutureExt;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::time::timeout;
 use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use crate::token::CancellationToken;
 use tracing::{self, debug, error, info, info_span, trace, warn, Instrument};
 
 /// Cancellation tokens and labels for the tasks currently executing, keyed by task id.

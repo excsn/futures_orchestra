@@ -3,7 +3,7 @@ use crate::task::TaskLabel;
 use fibre::oneshot;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
+use crate::token::CancellationToken;
 
 /// A handle to a task submitted to the `FuturePoolManager`.
 ///

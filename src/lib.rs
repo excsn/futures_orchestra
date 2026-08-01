@@ -8,6 +8,7 @@ mod manager;
 mod notifier;
 mod task;
 mod task_queue;
+mod token;
 
 
 pub use error::PoolError;

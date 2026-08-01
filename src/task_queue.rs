@@ -5,7 +5,7 @@ use crate::task::ManagedTaskInternal;
 use fibre::mpsc::{self, UnboundedAsyncReceiver, UnboundedAsyncSender, RecvError};
 use std::fmt;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
+use crate::token::CancellationToken;
 
 /// An internal message type that pairs a task with the permit it holds.
 ///
