@@ -1,7 +1,9 @@
 use crate::capacity_gate::CapacityGate;
 use crate::error::PoolError;
 use crate::handle::TaskHandle;
-use crate::notifier::{CompletionNotifier, InternalCompletionMessage, TaskCompletionStatus};
+use crate::notifier::{
+  CompletionNotifier, CompletionSink, InternalCompletionMessage, SharedCompletionSink, TaskCompletionStatus,
+};
 use crate::task::{ManagedTaskInternal, TaskLabel, TaskToExecute};
 
 use crate::task_queue::{QueueConsumer, QueueProducer, TaskQueue};
@@ -10,11 +12,10 @@ use crate::TaskCompletionInfo;
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
-use fibre::mpsc;
 use fibre::oneshot::oneshot;
 use futures::FutureExt;
 use tokio::runtime::Handle as TokioHandle;
@@ -77,10 +78,11 @@ pub struct FuturePoolManager<R: Send + 'static> {
   next_task_id: Arc<AtomicU64>,
   /// The decoupled notifier system for handling completion events.
   completion_notifier: Arc<CompletionNotifier>,
-  /// The pool-wide sender for completion messages to the notifier. Shared by
-  /// all clones of the manager; the first shutdown (or last-clone drop) takes
-  /// and drops it so the notifier's queue can disconnect.
-  internal_notification_tx: Arc<Mutex<Option<mpsc::UnboundedAsyncSender<InternalCompletionMessage>>>>,
+  /// The completion queue's pool-wide sender, shared by all clones of the manager.
+  /// Stays uninitialized until the first completion handler is registered, so a pool
+  /// nobody listens to never builds a queue. The first shutdown (or last-clone drop)
+  /// closes it so the notifier's queue can disconnect.
+  notification_sink: SharedCompletionSink,
 }
 
 impl<R: Send + 'static> FuturePoolManager<R> {
@@ -103,12 +105,11 @@ impl<R: Send + 'static> FuturePoolManager<R> {
     let task_queue = TaskQueue::new(queue_capacity);
     let (producer_queue, consumer_queue) = task_queue.split();
 
-    let (internal_noti_tx_for_fpm, internal_notification_rx_for_notifier_worker) =
-      fibre::mpsc::unbounded_async::<InternalCompletionMessage>();
-    let worker_notification_tx = internal_noti_tx_for_fpm.clone();
+    let notification_sink: SharedCompletionSink = Arc::new(OnceLock::new());
+    let worker_notification_sink = notification_sink.clone();
 
     let notifier_arc = CompletionNotifier::new(
-      internal_notification_rx_for_notifier_worker,
+      notification_sink.clone(),
       tokio_handle.clone(),
       shutdown_token.clone(),
       pool_name_arc_for_components.clone(),
@@ -124,7 +125,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
       worker_join_handle_internal: worker_join_handle_internal_arc.clone(),
       next_task_id: Arc::new(AtomicU64::new(0)),
       completion_notifier: notifier_arc,
-      internal_notification_tx: Arc::new(Mutex::new(Some(internal_noti_tx_for_fpm))),
+      notification_sink,
     };
 
     let worker_pool_name = manager.pool_name.clone();
@@ -142,7 +143,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
           worker_tokio_handle,
           worker_active_task_info,
           worker_shutdown_token,
-          worker_notification_tx,
+          worker_notification_sink,
         )
         .await;
       }
@@ -244,6 +245,10 @@ impl<R: Send + 'static> FuturePoolManager<R> {
   /// Multiple handlers can be registered. Each handler will be invoked with
   /// `TaskCompletionInfo` detailing the outcome of a task. Handlers are executed
   /// asynchronously by a dedicated notifier worker and should be non-blocking.
+  ///
+  /// Handlers only observe tasks that complete after registration: the pool does not
+  /// record completions while no handler is registered. Register before submitting work
+  /// if every task's outcome matters.
   pub fn add_completion_handler(&self, handler: impl Fn(TaskCompletionInfo) + Send + Sync + 'static) {
     self.completion_notifier.add_handler(handler);
   }
@@ -374,7 +379,9 @@ impl<R: Send + 'static> FuturePoolManager<R> {
         pool_name = %self.pool_name,
         "Dropping pool-wide notification sender before awaiting notifier."
       );
-      drop(self.internal_notification_tx.lock().take());
+      if let Some(sink) = self.notification_sink.get() {
+        sink.close();
+      }
     }
 
     debug!(
@@ -449,7 +456,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
     tasks_tokio_handle: TokioHandle,
     active_task_info_map: ActiveTaskInfo,
     shutdown_token: CancellationToken,
-    notification_tx: mpsc::UnboundedAsyncSender<InternalCompletionMessage>,
+    notification_sink: SharedCompletionSink,
   ) {
     info!(name = %*pool_name, "Worker loop started.");
 
@@ -500,18 +507,19 @@ impl<R: Send + 'static> FuturePoolManager<R> {
             let _ = tx.send(Err(PoolError::TaskCancelled));
           }
 
-          let completion_msg = InternalCompletionMessage {
-            task_id: managed_task.task_id,
-            pool_name: pool_name.clone(),
-            labels: Arc::new(managed_task.labels),
-            status: TaskCompletionStatus::Cancelled,
-          };
-          let mut noti_tx = notification_tx.clone();
-          if noti_tx.send(completion_msg).await.is_err() {
-            error!(
-              pool_name = %*pool_name,
-              "Failed to send completion for pre-cancelled task."
-            );
+          if let Some(mut noti_tx) = notification_sink.get().and_then(CompletionSink::sender) {
+            let completion_msg = InternalCompletionMessage {
+              task_id: managed_task.task_id,
+              pool_name: pool_name.clone(),
+              labels: Arc::new(managed_task.labels),
+              status: TaskCompletionStatus::Cancelled,
+            };
+            if noti_tx.send(completion_msg).await.is_err() {
+              error!(
+                pool_name = %*pool_name,
+                "Failed to send completion for pre-cancelled task."
+              );
+            }
           }
           continue;
         }
@@ -530,7 +538,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
 
         tasks_tokio_handle.spawn({
 
-          let mut notification_tx_for_spawned_task = notification_tx.clone();
+          let notification_tx_for_spawned_task = notification_sink.get().and_then(CompletionSink::sender);
 
           async move {
             let _permit_guard = concurrency_permit; // Permit held for task duration
@@ -577,20 +585,21 @@ impl<R: Send + 'static> FuturePoolManager<R> {
               );
             }
 
-            let completion_msg = InternalCompletionMessage {
-              task_id,
-              pool_name: pool_name_for_notification,
-              labels: task_labels_for_active_map,
-              status: completion_status,
-            };
+            if let Some(mut noti_tx) = notification_tx_for_spawned_task {
+              let completion_msg = InternalCompletionMessage {
+                task_id,
+                pool_name: pool_name_for_notification,
+                labels: task_labels_for_active_map,
+                status: completion_status,
+              };
 
-            
-            if notification_tx_for_spawned_task.send(completion_msg).await.is_err() {
-              error!(
-                pool_name = %*pool_name_for_task_execution,
-                %task_id,
-                "Failed to send completion notification for task."
-              );
+              if noti_tx.send(completion_msg).await.is_err() {
+                error!(
+                  pool_name = %*pool_name_for_task_execution,
+                  %task_id,
+                  "Failed to send completion notification for task."
+                );
+              }
             }
           }
           .instrument(info_span!("managed_task", pool_name = %*pool_name, %task_id))
@@ -640,7 +649,9 @@ impl<R: Send + 'static> Drop for FuturePoolManager<R> {
       );
       self.shutdown_token.cancel();
       self.task_queue.close();
-      drop(self.internal_notification_tx.lock().take());
+      if let Some(sink) = self.notification_sink.get() {
+        sink.close();
+      }
 
       debug!(
         pool_name = %*self.pool_name,
@@ -652,5 +663,111 @@ impl<R: Send + 'static> Drop for FuturePoolManager<R> {
         "Drop: Shutdown already in progress or completed."
       );
     }
+  }
+}
+
+#[cfg(test)]
+impl<R: Send + 'static> FuturePoolManager<R> {
+  /// Completion messages sitting in the queue with nothing consuming them.
+  fn pending_completions(&self) -> usize {
+    self
+      .notification_sink
+      .get()
+      .and_then(CompletionSink::sender)
+      .map_or(0, |tx| tx.len())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn no_completion_queue_without_a_handler() {
+    let manager = FuturePoolManager::<u32>::new(2, 8, TokioHandle::current(), "lazy_notifier_pool");
+
+    for i in 0..8u32 {
+      let handle = manager.submit(HashSet::new(), Box::pin(async move { i })).await.unwrap();
+      assert_eq!(handle.await_result().await, Ok(i));
+    }
+
+    assert_eq!(
+      manager.pending_completions(),
+      0,
+      "completions were queued with nothing to consume them"
+    );
+    assert!(manager.notification_sink.get().is_none());
+
+    manager.shutdown(ShutdownMode::Graceful).await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn cancelled_tasks_do_not_queue_completions_without_a_handler() {
+    let manager = FuturePoolManager::<u32>::new(1, 8, TokioHandle::current(), "lazy_notifier_cancel_pool");
+
+    let blocker = manager
+      .submit(
+        HashSet::new(),
+        Box::pin(async {
+          tokio::time::sleep(Duration::from_millis(100)).await;
+          0u32
+        }),
+      )
+      .await
+      .unwrap();
+
+    let mut queued = Vec::new();
+    for i in 1..5u32 {
+      queued.push(manager.submit(HashSet::new(), Box::pin(async move { i })).await.unwrap());
+    }
+    for handle in &queued {
+      handle.cancel();
+    }
+
+    assert_eq!(blocker.await_result().await, Ok(0));
+    for handle in queued {
+      assert_eq!(handle.await_result().await, Err(PoolError::TaskCancelled));
+    }
+
+    assert_eq!(manager.pending_completions(), 0);
+    assert!(manager.notification_sink.get().is_none());
+
+    manager.shutdown(ShutdownMode::Graceful).await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn completion_queue_is_built_on_first_handler() {
+    let manager = FuturePoolManager::<u32>::new(2, 8, TokioHandle::current(), "eager_notifier_pool");
+    assert!(manager.notification_sink.get().is_none());
+
+    let seen = Arc::new(AtomicU64::new(0));
+    let seen_in_handler = seen.clone();
+    manager.add_completion_handler(move |_| {
+      seen_in_handler.fetch_add(1, AtomicOrdering::Relaxed);
+    });
+
+    assert!(manager.notification_sink.get().is_some());
+
+    let handle = manager.submit(HashSet::new(), Box::pin(async { 7u32 })).await.unwrap();
+    assert_eq!(handle.await_result().await, Ok(7));
+
+    manager.shutdown(ShutdownMode::Graceful).await.unwrap();
+    assert_eq!(seen.load(AtomicOrdering::Relaxed), 1);
+  }
+
+  #[tokio::test]
+  async fn shutdown_closes_the_sink_so_the_notifier_can_join() {
+    let manager = FuturePoolManager::<u32>::new(2, 8, TokioHandle::current(), "sink_close_pool");
+    manager.add_completion_handler(|_| {});
+
+    let sink = manager.notification_sink.clone();
+    assert!(sink.get().unwrap().sender().is_some());
+
+    let handle = manager.submit(HashSet::new(), Box::pin(async { 1u32 })).await.unwrap();
+    assert_eq!(handle.await_result().await, Ok(1));
+
+    manager.shutdown(ShutdownMode::Graceful).await.unwrap();
+
+    assert!(sink.get().unwrap().sender().is_none());
   }
 }

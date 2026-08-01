@@ -172,7 +172,7 @@ The main entry point for interacting with the thread pool. It implements `Clone`
     Requests cancellation for all active tasks that have any of the specified labels.
 
 *   `pub fn add_completion_handler(&self, handler: impl Fn(TaskCompletionInfo) + Send + Sync + 'static)`
-    Registers a handler function to be called upon task completion, cancellation, or panic. Multiple handlers can be added. See [Completion Handlers](#completion-handlers) and [Completion Notifications](#completion-notifications).
+    Registers a handler function to be called upon task completion, cancellation, or panic. Multiple handlers can be added. Handlers only observe tasks that complete after registration. See [Completion Handlers](#completion-handlers) and [Completion Notifications](#completion-notifications).
 
 *   `pub async fn shutdown(self, mode: ShutdownMode) -> Result<(), PoolError>`
     Initiates the shutdown process for the pool. This consumes the `FuturePoolManager` instance.
@@ -307,6 +307,8 @@ The `shutdown` method takes `self` by value, consuming the specific `FuturePoolM
 ### Completion Handlers
 
 You can register functions to be called whenever a task finishes, is cancelled, or panics. This is useful for logging, metrics, or triggering other actions.
+
+The notification machinery is built on demand: a pool with no completion handler never creates the completion queue at all, so handlers only observe tasks that complete after registration. Register before submitting work if every task's outcome matters.
 
 ```rust
 use futures_orchestra::{FuturePoolManager, TaskCompletionInfo, TaskCompletionStatus, ShutdownMode};

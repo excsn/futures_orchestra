@@ -38,6 +38,23 @@ Register custom handlers to be invoked when tasks complete, providing detailed i
 ### Detailed Error Reporting
 The library defines a comprehensive `PoolError` enum, clearly indicating the source of issues such as queue send errors, result channel problems, task panics, or cancellations.
 
+## Performance
+
+*Pay the queuing tax that tokio doesn't.*
+
+Cost per task on an Apple M4 Pro (14 cores, rustc 1.94.1): 4-worker Tokio runtime, 1000 trivial tasks per iteration, concurrency limit 64, queue capacity 2048, criterion medians.
+
+| | per task | throughput |
+| --- | --- | --- |
+| `tokio::spawn` + `JoinSet` | 0.57 µs | 1.75 M/s |
+| `tokio::sync::Semaphore` + `tokio::spawn` | 0.68 µs | 1.48 M/s |
+| `FuturePoolManager` | 1.42 µs | 705 K/s |
+| `FuturePoolManager`, 3 labels per task | 1.93 µs | 518 K/s |
+| `FuturePoolManager`, one completion handler | 2.06 µs | 485 K/s |
+| `FuturePoolManager`, 3 labels and one handler | 2.22 µs | 450 K/s |
+
+Reproduce with `cargo bench`. Benches are in `benches/`, split into `tokio_baseline` and `orchestra`.
+
 ## Installation
 
 Add `futures_orchestra` to your `Cargo.toml`:

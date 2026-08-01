@@ -3,14 +3,15 @@ use crate::task::TaskLabel;
 
 use std::collections::HashSet;
 use std::fmt;
-use std::sync::{Arc, Mutex as StdMutex, Once, RwLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock};
 use std::time::SystemTime;
 
-use fibre::mpsc::{UnboundedAsyncReceiver, RecvError};
+use fibre::mpsc::{self, UnboundedAsyncReceiver, UnboundedAsyncSender, RecvError};
+use parking_lot::Mutex;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, info_span, trace, warn, Instrument};
+use tracing::{debug, error, info, info_span, trace, Instrument};
 
 // --- Public Event Structs for Handlers ---
 
@@ -51,10 +52,50 @@ pub(crate) struct InternalCompletionMessage {
   pub(crate) status: TaskCompletionStatus,
 }
 
+// --- Completion Sink ---
+
+/// Holds the pool-wide sender for the completion queue.
+///
+/// Lives inside a `OnceLock`, giving three distinct states: the cell is unset while no
+/// completion handler has ever been registered (no channel exists and producers stay
+/// silent), it holds `Some` sender once a handler has been added, and it holds `None`
+/// after shutdown. The last two must stay distinguishable so a handler registered after
+/// shutdown cannot resurrect the channel.
+pub(crate) struct CompletionSink {
+  tx: Mutex<Option<UnboundedAsyncSender<InternalCompletionMessage>>>,
+}
+
+impl CompletionSink {
+  fn new(tx: UnboundedAsyncSender<InternalCompletionMessage>) -> Self {
+    Self {
+      tx: Mutex::new(Some(tx)),
+    }
+  }
+
+  pub(crate) fn sender(&self) -> Option<UnboundedAsyncSender<InternalCompletionMessage>> {
+    self.tx.lock().clone()
+  }
+
+  /// Drops the pool-wide sender so the queue disconnects once every per-task clone is
+  /// gone, which is what terminates the notification worker.
+  pub(crate) fn close(&self) {
+    drop(self.tx.lock().take());
+  }
+}
+
+impl fmt::Debug for CompletionSink {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("CompletionSink")
+      .field("open", &self.tx.lock().is_some())
+      .finish()
+  }
+}
+
+pub(crate) type SharedCompletionSink = Arc<OnceLock<CompletionSink>>;
+
 // --- CompletionNotifier Struct ---
 
 struct NotifierInternalState {
-  internal_rx_for_init: Option<UnboundedAsyncReceiver<InternalCompletionMessage>>,
   tokio_handle: TokioHandle,
   pool_shutdown_token: CancellationToken,
   pool_name_for_logging: Arc<String>,
@@ -66,14 +107,14 @@ type HandlerList = Arc<RwLock<Vec<CompletionHandler>>>;
 
 pub(crate) struct CompletionNotifier {
   handlers: HandlerList,
-  init_once: Once,
+  sink: SharedCompletionSink,
   internal_state_for_init: StdMutex<NotifierInternalState>,
 }
 
 impl fmt::Debug for CompletionNotifier {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let handler_count = self.handlers.try_read().map_or(0, |guard| guard.len());
-    let initialized = self.init_once.is_completed();
+    let initialized = self.sink.get().is_some();
 
     f.debug_struct("CompletionNotifier")
       .field("handler_count", &handler_count)
@@ -86,7 +127,6 @@ impl fmt::Debug for CompletionNotifier {
 impl fmt::Debug for NotifierInternalState {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("NotifierInternalState")
-      .field("internal_rx_for_init_is_some", &self.internal_rx_for_init.is_some())
       .field("pool_name_for_logging", &self.pool_name_for_logging)
       .field("worker_join_handle_is_some", &self.worker_join_handle.is_some())
       .finish()
@@ -95,16 +135,15 @@ impl fmt::Debug for NotifierInternalState {
 
 impl CompletionNotifier {
   pub(crate) fn new(
-    internal_rx: UnboundedAsyncReceiver<InternalCompletionMessage>,
+    sink: SharedCompletionSink,
     tokio_handle: TokioHandle,
     pool_shutdown_token: CancellationToken,
     pool_name_for_logging: Arc<String>,
   ) -> Arc<Self> {
     Arc::new(Self {
       handlers: Arc::new(RwLock::new(Vec::new())),
-      init_once: Once::new(),
+      sink,
       internal_state_for_init: StdMutex::new(NotifierInternalState {
-        internal_rx_for_init: Some(internal_rx),
         tokio_handle,
         pool_shutdown_token,
         pool_name_for_logging,
@@ -114,27 +153,23 @@ impl CompletionNotifier {
   }
 
   fn ensure_worker_initialized(&self) {
-    self.init_once.call_once(|| {
+    self.sink.get_or_init(|| {
       let mut state_guard = self.internal_state_for_init.lock().unwrap();
-      if let Some(rx_to_use) = state_guard.internal_rx_for_init.take() {
-        info!(pool_name = %*state_guard.pool_name_for_logging, "First completion handler added. Initializing notification worker.");
+      info!(pool_name = %*state_guard.pool_name_for_logging, "First completion handler added. Initializing notification worker.");
 
-        let worker_handlers = self.handlers.clone();
-        let worker_shutdown_token = state_guard.pool_shutdown_token.clone();
-        let worker_pool_name = state_guard.pool_name_for_logging.clone();
+      let (tx, rx) = mpsc::unbounded_async::<InternalCompletionMessage>();
 
-        let worker_jh = state_guard.tokio_handle.spawn(
-          Self::run_notification_worker_loop(
-            rx_to_use,
-            worker_handlers,
-            worker_shutdown_token,
-          )
+      let worker_handlers = self.handlers.clone();
+      let worker_shutdown_token = state_guard.pool_shutdown_token.clone();
+      let worker_pool_name = state_guard.pool_name_for_logging.clone();
+
+      let worker_jh = state_guard.tokio_handle.spawn(
+        Self::run_notification_worker_loop(rx, worker_handlers, worker_shutdown_token)
           .instrument(info_span!("notification_worker_loop", pool_name = %*worker_pool_name)),
-        );
-        state_guard.worker_join_handle = Some(worker_jh);
-      } else {
-        warn!(pool_name = %*state_guard.pool_name_for_logging, "Notifier initialization: RX already taken, worker might have been initialized concurrently (unexpected with Once).");
-      }
+      );
+      state_guard.worker_join_handle = Some(worker_jh);
+
+      CompletionSink::new(tx)
     });
   }
 

@@ -87,7 +87,7 @@ The central struct for creating, managing, and shutting down a task pool.
         handler: impl Fn(TaskCompletionInfo) + Send + Sync + 'static
     )
     ```
-    Registers a handler function to be called upon any task's completion.
+    Registers a handler function to be called upon any task's completion. Handlers only observe tasks that complete after registration, since the pool does not record completions while no handler is registered.
 
 *   **Shutdown**
     ```rust
