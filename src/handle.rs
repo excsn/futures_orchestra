@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 pub struct TaskHandle<R: Send + 'static> {
   pub(crate) task_id: u64,
   pub(crate) cancellation_token: CancellationToken,
-  pub(crate) result_receiver: Option<oneshot::Receiver<Result<R, PoolError>>>,
+  pub(crate) result_receiver: Option<oneshot::ExclusiveReceiver<Result<R, PoolError>>>,
   pub(crate) labels: Arc<HashSet<TaskLabel>>,
   pub(crate) is_detached: bool,
 }
@@ -62,7 +62,7 @@ impl<R: Send + 'static> TaskHandle<R> {
   /// Returns `PoolError::ResultUnavailable` if `await_result` has already been called.
   pub async fn await_result(mut self) -> Result<R, PoolError> {
     match self.result_receiver.take() {
-      Some(rx) => {
+      Some(mut rx) => {
         match rx.recv().await {
           Ok(task_outcome_result) => task_outcome_result, // This is already Result<R, PoolError>
           Err(oneshot_recv_error) => {

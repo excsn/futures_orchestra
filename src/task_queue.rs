@@ -195,12 +195,12 @@ mod tests {
   use std::collections::HashSet;
   use std::sync::atomic::{AtomicUsize, Ordering};
   use std::time::Duration;
-  use fibre::oneshot::oneshot;
+  use fibre::oneshot::exclusive;
 
   // Helper to create a dummy ManagedTaskInternal for testing the queue.
   fn dummy_task(id: u64) -> ManagedTaskInternal<String> {
     let future: TaskToExecute<String> = Box::pin(async move { "done".to_string() });
-    let (tx, _) = oneshot();
+    let (tx, _) = exclusive();
     ManagedTaskInternal {
       task_id: id,
       labels: HashSet::new(),

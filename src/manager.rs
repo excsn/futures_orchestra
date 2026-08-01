@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
-use fibre::oneshot::oneshot;
+use fibre::oneshot::exclusive;
 use futures::FutureExt;
 use tokio::runtime::Handle as TokioHandle;
 use tokio::time::timeout;
@@ -197,7 +197,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
 
     let task_id = self.next_task_id.fetch_add(1, AtomicOrdering::Relaxed);
     let token = CancellationToken::new();
-    let (result_tx, result_rx) = oneshot::<Result<R, PoolError>>();
+    let (result_tx, result_rx) = exclusive::<Result<R, PoolError>>();
     let arc_labels = Arc::new(labels);
 
     let managed_task = ManagedTaskInternal {

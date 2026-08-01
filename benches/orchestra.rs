@@ -28,9 +28,7 @@ async fn drain(manager: &FuturePoolManager<u64>, task_labels: &HashSet<TaskLabel
 
   let mut sum = 0u64;
   for handle in handles {
-    // A result is lost roughly once per 10^5-10^6 tasks (fibre oneshot: send returns Ok,
-    // receiver reports disconnected). Unrelated to what this measures; must not abort the run.
-    sum += handle.await_result().await.unwrap_or(0);
+    sum += handle.await_result().await.unwrap();
   }
   black_box(sum)
 }

@@ -20,5 +20,5 @@ pub(crate) struct ManagedTaskInternal<R: Send + 'static> {
   pub(crate) labels: HashSet<TaskLabel>,
   pub(crate) future: TaskToExecute<R>,
   pub(crate) token: CancellationToken,
-  pub(crate) result_sender: Option<oneshot::Sender<Result<R, PoolError>>>,
+  pub(crate) result_sender: Option<oneshot::ExclusiveSender<Result<R, PoolError>>>,
 }
