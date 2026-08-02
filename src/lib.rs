@@ -3,9 +3,11 @@
 
 mod error;
 mod handle;
+mod active;
 mod capacity_gate;
 mod manager;
 mod notifier;
+mod rlxd;
 mod task;
 mod task_queue;
 mod token;
@@ -14,5 +16,6 @@ mod token;
 pub use error::PoolError;
 pub use handle::TaskHandle;
 pub use manager::{FuturePoolManager, ShutdownMode};
+pub use rlxd::FuturePoolManagerRlxd;
 pub use notifier::{TaskCompletionInfo, TaskCompletionStatus};
 pub use task::{TaskLabel, TaskToExecute};

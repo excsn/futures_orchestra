@@ -38,20 +38,29 @@ Register custom handlers to be invoked when tasks complete, providing detailed i
 ### Detailed Error Reporting
 The library defines a comprehensive `PoolError` enum, clearly indicating the source of issues such as queue send errors, result channel problems, task panics, or cancellations.
 
+### Relaxed Variant
+`FuturePoolManagerRlxd` offers the same API and features with relaxed start-order FIFO, dispatching directly past the queue when the pool is idle for roughly 40% more throughput.
+
 ## Performance
 
 *Pay the queuing tax that tokio doesn't.*
 
-Cost per task on an Apple M4 Pro (14 cores, rustc 1.94.1, fibre 0.6.3): default multi-threaded Tokio runtime, 1000 trivial tasks per iteration, concurrency limit 64, queue capacity 2048, criterion medians.
+Cost per task on an Apple M4 Pro (14 cores, rustc 1.94.1): default multi-threaded Tokio runtime, 1000 trivial tasks per iteration, concurrency limit 64, queue capacity 2048, criterion medians.
 
 | | per task | throughput |
 | --- | --- | --- |
-| `tokio::spawn` + `JoinSet` | 0.54 µs | 1.85 M/s |
-| `tokio::sync::Semaphore` + `tokio::spawn` | 0.57 µs | 1.75 M/s |
-| `FuturePoolManager` | 1.19 µs | 841 K/s |
-| `FuturePoolManager`, one completion handler | 1.92 µs | 520 K/s |
-
-Labels are shared by `Arc` rather than cloned, so they add no measurable per-task cost: three labels measures 1.16 µs, within noise of the unlabelled 1.19 µs.
+| `tokio::spawn` + `JoinSet` | 0.38 µs | 2.62 M/s |
+| `tokio::sync::Semaphore` + `tokio::spawn` | 0.46 µs | 2.18 M/s |
+| the above + result channel + panic isolation | 0.41 µs | 2.45 M/s |
+| the above + cancellation + task registry (DIY feature parity) | 0.83 µs | 1.20 M/s |
+| `FuturePoolManager` | 0.72 µs | 1.39 M/s |
+| `FuturePoolManager`, one completion handler | 1.32 µs | 755 K/s |
+| `FuturePoolManagerRlxd`, 1 lane | 0.53 µs | 1.89 M/s |
+| `FuturePoolManagerRlxd`, 2 lanes | 0.55 µs | 1.83 M/s |
+| `FuturePoolManagerRlxd`, 4 lanes | 0.52 µs | 1.94 M/s |
+| `FuturePoolManagerRlxd`, 1 lane, one completion handler | 1.02 µs | 978 K/s |
+| `FuturePoolManagerRlxd`, 2 lanes, one completion handler | 1.06 µs | 939 K/s |
+| `FuturePoolManagerRlxd`, 4 lanes, one completion handler | 1.09 µs | 919 K/s |
 
 Reproduce with `cargo bench`. Benches are in `benches/`, split into `tokio_baseline` and `orchestra`.
 

@@ -1,15 +1,16 @@
+use crate::active::ActiveSlots;
 use crate::capacity_gate::CapacityGate;
 use crate::error::PoolError;
 use crate::handle::TaskHandle;
 use crate::notifier::{
   CompletionNotifier, CompletionSink, InternalCompletionMessage, SharedCompletionSink, TaskCompletionStatus,
 };
-use crate::task::{ManagedTaskInternal, TaskLabel, TaskToExecute};
+use crate::task::{ManagedTaskInternal, TaskCore, TaskLabel, TaskToExecute};
 
 use crate::task_queue::{QueueConsumer, QueueProducer, TaskQueue};
 use crate::TaskCompletionInfo;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
@@ -24,8 +25,8 @@ use tokio::task::JoinHandle;
 use crate::token::CancellationToken;
 use tracing::{self, debug, error, info, info_span, trace, warn, Instrument};
 
-/// Cancellation tokens and labels for the tasks currently executing, keyed by task id.
-type ActiveTaskInfo = Arc<RwLock<HashMap<u64, (CancellationToken, Arc<HashSet<TaskLabel>>)>>>;
+/// The tasks currently executing, keyed by slot rather than by id.
+type ActiveTaskInfo = Arc<RwLock<ActiveSlots>>;
 
 /// Defines how the `FuturePoolManager` should behave upon shutdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +121,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
       pool_name: pool_name_arc_for_components,
       concurrency_gate: Arc::new(CapacityGate::new(concurrency_limit.max(1))),
       task_queue: producer_queue,
-      active_task_info: Arc::new(RwLock::new(HashMap::with_capacity(concurrency_limit.max(1)))),
+      active_task_info: Arc::new(RwLock::new(ActiveSlots::with_capacity(concurrency_limit.max(1)))),
       shutdown_token: shutdown_token.clone(),
       worker_join_handle_internal: worker_join_handle_internal_arc.clone(),
       next_task_id: Arc::new(AtomicU64::new(0)),
@@ -196,26 +197,21 @@ impl<R: Send + 'static> FuturePoolManager<R> {
     }
 
     let task_id = self.next_task_id.fetch_add(1, AtomicOrdering::Relaxed);
-    let token = CancellationToken::new();
+    let core = Arc::new(TaskCore::new(task_id, labels));
     let (result_tx, result_rx) = exclusive::<Result<R, PoolError>>();
-    let arc_labels = Arc::new(labels);
 
     let managed_task = ManagedTaskInternal {
-      task_id,
-      labels: arc_labels.clone(),
+      core: core.clone(),
       future: task_future,
-      token: token.clone(),
       result_sender: Some(result_tx),
     };
 
-    debug!(pool_name = %self.pool_name, %task_id, labels = ?managed_task.labels, "Submitting task to queue.");
+    debug!(pool_name = %self.pool_name, %task_id, labels = ?core.labels(), "Submitting task to queue.");
 
     match self.task_queue.send(managed_task, &self.shutdown_token).await {
       Ok(()) => Ok(TaskHandle {
-        task_id,
-        cancellation_token: token,
+        core,
         result_receiver: Some(result_rx),
-        labels: arc_labels,
         is_detached: false,
       }),
       Err(e) => {
@@ -284,24 +280,19 @@ impl<R: Send + 'static> FuturePoolManager<R> {
           pool_name = %self.pool_name,
           "Forceful shutdown: Cancelling all active tasks."
         );
-        let tasks_to_cancel: Vec<(u64, CancellationToken)> = self
-          .active_task_info
-          .read()
-          .iter()
-          .map(|(task_id, (token, _))| (*task_id, token.clone()))
-          .collect();
+        let tasks_to_cancel: Vec<Arc<TaskCore>> = self.active_task_info.read().all_tokens();
         if tasks_to_cancel.is_empty() {
           info!(
             pool_name = %self.pool_name,
             "No active tasks to cancel forcefully."
           );
         } else {
-          for (task_id, token) in tasks_to_cancel {
+          for core in tasks_to_cancel {
             debug!(
-              pool_name = %self.pool_name, %task_id,
+              pool_name = %self.pool_name, task_id = %core.task_id(),
               "Forcefully cancelling active task during shutdown."
             );
-            token.cancel();
+            core.cancel();
           }
         }
       }
@@ -425,20 +416,14 @@ impl<R: Send + 'static> FuturePoolManager<R> {
       "Requesting cancellation for active tasks with labels: {:?}",
       labels_to_cancel
     );
-    let matched: Vec<(u64, CancellationToken)> = self
-      .active_task_info
-      .read()
-      .iter()
-      .filter(|(_, (_, task_labels))| !task_labels.is_disjoint(labels_to_cancel))
-      .map(|(task_id, (token, _))| (*task_id, token.clone()))
-      .collect();
+    let matched: Vec<Arc<TaskCore>> = self.active_task_info.read().tokens_matching(labels_to_cancel);
 
-    for (task_id, token) in matched {
+    for core in matched {
       debug!(
-        pool_name = %self.pool_name, %task_id,
+        pool_name = %self.pool_name, task_id = %core.task_id(),
         "Signaling cancellation for active task due to label match."
       );
-      token.cancel();
+      core.cancel();
     }
   }
 
@@ -460,18 +445,30 @@ impl<R: Send + 'static> FuturePoolManager<R> {
   ) {
     info!(name = %*pool_name, "Worker loop started.");
 
+    // Both selects poll their productive arm first: under load it is already ready, so
+    // the shutdown arm is never polled and no cancellation waiter is registered per
+    // task. The token arm only comes into play when the dispatcher actually parks, and
+    // the `is_cancelled` checks give shutdown back its priority when both arms are
+    // ready at once.
     loop {
+      if shutdown_token.is_cancelled() {
+        info!(name = %pool_name, "Shutdown signal (token) received. Worker loop terminating.");
+        break;
+      }
+
       let concurrency_permit = tokio::select! {
           biased;
+          permit = concurrency_gate.clone().acquire_owned() => permit,
           _ = shutdown_token.cancelled() => {
-              info!(name = %pool_name, "Shutdown signal (token) received. Worker loop terminating.");
+              info!(name = %pool_name, "Shutdown signal (token) received while waiting for permit. Worker loop terminating.");
               break;
           }
-          permit = concurrency_gate.clone().acquire_owned() => {
-            // The `acquire` future resolves to the permit guard.
-            permit
-          }
       };
+
+      if shutdown_token.is_cancelled() {
+        info!(name = %pool_name, "Shutdown signal (token) received. Worker loop terminating.");
+        break;
+      }
 
       trace!(
         name = %*pool_name,
@@ -481,12 +478,12 @@ impl<R: Send + 'static> FuturePoolManager<R> {
 
       let managed_task_option = tokio::select! {
           biased;
-          _ = shutdown_token.cancelled() => {
-              info!(name = %*pool_name, "Shutdown signal (token) received while holding concurrency permit and waiting for task. Releasing permit.");
-              None
-          }
           recv_result = task_queue.recv() => {
               match recv_result {
+                  Ok(_task) if shutdown_token.is_cancelled() => {
+                      info!(name = %*pool_name, "Shutdown signal (token) received while holding concurrency permit and waiting for task. Releasing permit.");
+                      None
+                  }
                   Ok(task) => Some(task),
                   Err(_) => {
                       info!(name = %*pool_name, "Task queue closed and empty. Worker loop will exit.");
@@ -494,24 +491,27 @@ impl<R: Send + 'static> FuturePoolManager<R> {
                   }
               }
           }
+          _ = shutdown_token.cancelled() => {
+              info!(name = %*pool_name, "Shutdown signal (token) received while holding concurrency permit and waiting for task. Releasing permit.");
+              None
+          }
       };
 
-      if let Some(managed_task) = managed_task_option {
-        if managed_task.token.is_cancelled() {
+      if let Some(mut managed_task) = managed_task_option {
+        if managed_task.core.is_cancelled() {
           debug!(
             name = %*pool_name,
-            task_id = managed_task.task_id,
+            task_id = managed_task.core.task_id(),
             "Dequeued task already cancelled."
           );
-          if let Some(tx) = managed_task.result_sender {
+          if let Some(tx) = managed_task.result_sender.take() {
             let _ = tx.send(Err(PoolError::TaskCancelled));
           }
 
           if let Some(mut noti_tx) = notification_sink.get().and_then(CompletionSink::sender) {
             let completion_msg = InternalCompletionMessage {
-              task_id: managed_task.task_id,
               pool_name: pool_name.clone(),
-              labels: managed_task.labels,
+              core: managed_task.core.clone(),
               status: TaskCompletionStatus::Cancelled,
             };
             if noti_tx.send(completion_msg).await.is_err() {
@@ -524,14 +524,10 @@ impl<R: Send + 'static> FuturePoolManager<R> {
           continue;
         }
 
-        let task_id = managed_task.task_id;
-        let task_labels_for_active_map = managed_task.labels.clone();
-        let task_specific_token = managed_task.token.clone();
+        let core = managed_task.core.clone();
+        let task_id = core.task_id();
 
-        active_task_info_map.write().insert(
-          task_id,
-          (task_specific_token.clone(), task_labels_for_active_map.clone()),
-        );
+        let active_slot = active_task_info_map.write().insert(core.clone());
 
         let pool_name_for_notification = pool_name.clone();
         let pool_name_for_task_execution = pool_name.clone();
@@ -542,35 +538,49 @@ impl<R: Send + 'static> FuturePoolManager<R> {
 
           async move {
             let _permit_guard = concurrency_permit; // Permit held for task duration
+            // The guarded future is polled first so a future that is immediately ready
+            // never registers a cancellation waiter; the flag check on completion keeps
+            // cancellation's priority identical to a cancellation-first select.
+            let guarded_future = AssertUnwindSafe(managed_task.future).catch_unwind();
+            tokio::pin!(guarded_future);
             let execution_outcome: Result<R, PoolError> = tokio::select! {
                 biased;
-                _ = task_specific_token.cancelled() => {
+                task_result = &mut guarded_future => {
+                  if core.is_cancelled() {
+                    debug!(
+                      pool_name = %*pool_name_for_task_execution,
+                      %task_id,
+                      "Task execution cancelled by its specific token."
+                    );
+                    Err(PoolError::TaskCancelled)
+                  } else {
+                    match task_result {
+                      Ok(actual_result) => {
+                        trace!(
+                          pool_name = %*pool_name_for_task_execution,
+                          %task_id,
+                          "Task executed successfully."
+                        );
+                        Ok(actual_result)
+                      },
+                      Err(_panic_payload) => {
+                        error!(
+                          pool_name = %*pool_name_for_task_execution,
+                          %task_id,
+                          "Task panicked during execution."
+                        );
+                        Err(PoolError::TaskPanicked)
+                      }
+                    }
+                  }
+                },
+                _ = core.cancelled() => {
                   debug!(
                     pool_name = %*pool_name_for_task_execution,
                     %task_id,
                     "Task execution cancelled by its specific token."
                   );
                   Err(PoolError::TaskCancelled)
-                },
-                task_result = AssertUnwindSafe(managed_task.future).catch_unwind() => {
-                  match task_result {
-                    Ok(actual_result) => {
-                      trace!(
-                        pool_name = %*pool_name_for_task_execution,
-                        %task_id,
-                        "Task executed successfully."
-                      );
-                      Ok(actual_result)
-                    },
-                    Err(_panic_payload) => {
-                      error!(
-                        pool_name = %*pool_name_for_task_execution,
-                        %task_id,
-                        "Task panicked during execution."
-                      );
-                      Err(PoolError::TaskPanicked)
-                    }
-                  }
                 }
             };
 
@@ -587,9 +597,8 @@ impl<R: Send + 'static> FuturePoolManager<R> {
 
             if let Some(mut noti_tx) = notification_tx_for_spawned_task {
               let completion_msg = InternalCompletionMessage {
-                task_id,
                 pool_name: pool_name_for_notification,
-                labels: task_labels_for_active_map,
+                core: core.clone(),
                 status: completion_status,
               };
 
@@ -607,7 +616,7 @@ impl<R: Send + 'static> FuturePoolManager<R> {
             let pool_name = pool_name.clone();
             let active_task_info_map = active_task_info_map.clone();
             move |_| {
-              active_task_info_map.write().remove(&task_id);
+              active_task_info_map.write().remove(active_slot);
               debug!(
                 name = %*pool_name,
                 %task_id,

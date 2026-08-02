@@ -23,7 +23,7 @@ pub(crate) struct QueueMessage<R: Send + 'static> {
 impl<R: Send + 'static> fmt::Debug for QueueMessage<R> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("QueueMessage")
-      .field("task_id", &self.task.task_id)
+      .field("task_id", &self.task.core.task_id())
       .finish_non_exhaustive()
   }
 }
@@ -195,17 +195,14 @@ mod tests {
   use std::collections::HashSet;
   use std::sync::atomic::{AtomicUsize, Ordering};
   use std::time::Duration;
-  use fibre::oneshot::exclusive;
-
+  
   // Helper to create a dummy ManagedTaskInternal for testing the queue.
   fn dummy_task(id: u64) -> ManagedTaskInternal<String> {
     let future: TaskToExecute<String> = Box::pin(async move { "done".to_string() });
-    let (tx, _) = exclusive();
+    let (tx, _) = fibre::oneshot::exclusive();
     ManagedTaskInternal {
-      task_id: id,
-      labels: Arc::new(HashSet::new()),
+      core: Arc::new(crate::task::TaskCore::new(id, HashSet::new())),
       future,
-      token: CancellationToken::new(),
       result_sender: Some(tx),
     }
   }
@@ -222,7 +219,7 @@ mod tests {
     assert_eq!(producer.gate.get_permits(), 4);
 
     let received_task = consumer.recv().await.unwrap();
-    assert_eq!(received_task.task_id, 1);
+    assert_eq!(received_task.core.task_id(), 1);
     // After recv, the permit is released.
     assert_eq!(producer.gate.get_permits(), 5);
   }
@@ -253,7 +250,7 @@ mod tests {
 
     // Now, receive a task, which should unblock the waiting send.
     let received_task = consumer.recv().await.unwrap();
-    assert_eq!(received_task.task_id, 1);
+    assert_eq!(received_task.core.task_id(), 1);
     assert_eq!(producer.gate.get_permits(), 1);
 
     // The second send should now complete quickly.
@@ -334,7 +331,7 @@ mod tests {
     producer.send(dummy_task(1), &shutdown_token).await.unwrap();
     producer.close();
 
-    assert_eq!(consumer.recv().await.unwrap().task_id, 1);
+    assert_eq!(consumer.recv().await.unwrap().core.task_id(), 1);
     assert_eq!(producer.gate.get_permits(), 2);
 
     let result = consumer.recv().await;

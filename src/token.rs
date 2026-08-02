@@ -4,33 +4,42 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
-struct Inner {
+/// Cancellation and completion flags for one task, embeddable in a larger allocation.
+///
+/// Cancellation is monotonic: once set it never clears, which is what makes
+/// [`CancelState::cancelled`] safe to drop and re-create inside a `select!`.
+#[derive(Debug)]
+pub(crate) struct CancelState {
   cancelled: AtomicBool,
+  finished: AtomicBool,
   notify: Notify,
 }
 
-/// A one-shot cancellation signal shared between a task, its handle, and the pool.
-///
-/// Cancellation is monotonic: once set it never clears, which is what makes
-/// [`CancellationToken::cancelled`] safe to drop and re-create inside a `select!`.
-#[derive(Clone)]
-pub(crate) struct CancellationToken(Arc<Inner>);
-
-impl CancellationToken {
+impl CancelState {
   pub(crate) fn new() -> Self {
-    CancellationToken(Arc::new(Inner {
+    CancelState {
       cancelled: AtomicBool::new(false),
+      finished: AtomicBool::new(false),
       notify: Notify::new(),
-    }))
+    }
   }
 
   pub(crate) fn is_cancelled(&self) -> bool {
-    self.0.cancelled.load(Ordering::Acquire)
+    self.cancelled.load(Ordering::Acquire)
   }
 
   pub(crate) fn cancel(&self) {
-    self.0.cancelled.store(true, Ordering::Release);
-    self.0.notify.notify_waiters();
+    self.cancelled.store(true, Ordering::Release);
+    self.notify.notify_waiters();
+  }
+
+  /// Marks the task done so a deferred registry sweep can reclaim its slot.
+  pub(crate) fn mark_finished(&self) {
+    self.finished.store(true, Ordering::Release);
+  }
+
+  pub(crate) fn is_finished(&self) -> bool {
+    self.finished.load(Ordering::Acquire)
   }
 
   /// Resolves once cancelled, immediately if that already happened.
@@ -40,7 +49,7 @@ impl CancellationToken {
         return;
       }
 
-      let notified = self.0.notify.notified();
+      let notified = self.notify.notified();
       tokio::pin!(notified);
       // Register before the second check: `notify_waiters` only wakes waiters that are
       // already registered, so checking first would drop a cancel landing in between
@@ -53,6 +62,31 @@ impl CancellationToken {
 
       notified.await;
     }
+  }
+}
+
+/// A one-shot cancellation signal shared between pool components, used for pool-wide
+/// shutdown. Per-task cancellation lives in [`crate::task::TaskCore`], which embeds
+/// the same [`CancelState`].
+#[derive(Clone)]
+pub(crate) struct CancellationToken(Arc<CancelState>);
+
+impl CancellationToken {
+  pub(crate) fn new() -> Self {
+    CancellationToken(Arc::new(CancelState::new()))
+  }
+
+  pub(crate) fn is_cancelled(&self) -> bool {
+    self.0.is_cancelled()
+  }
+
+  pub(crate) fn cancel(&self) {
+    self.0.cancel();
+  }
+
+  /// Resolves once cancelled, immediately if that already happened.
+  pub(crate) async fn cancelled(&self) {
+    self.0.cancelled().await;
   }
 }
 

@@ -1,5 +1,5 @@
 use crate::error::PoolError;
-use crate::task::TaskLabel;
+use crate::task::{TaskCore, TaskLabel};
 
 use std::collections::HashSet;
 use std::fmt;
@@ -46,9 +46,8 @@ pub struct TaskCompletionInfo {
 // --- Internal Message (crate-public) ---
 #[derive(Debug)]
 pub(crate) struct InternalCompletionMessage {
-  pub(crate) task_id: u64,
   pub(crate) pool_name: Arc<String>,
-  pub(crate) labels: Arc<HashSet<TaskLabel>>,
+  pub(crate) core: Arc<TaskCore>,
   pub(crate) status: TaskCompletionStatus,
 }
 
@@ -213,18 +212,18 @@ impl CompletionNotifier {
         recv_result = queue_rx.recv() => {
           match recv_result {
             Ok(internal_msg) => {
-              trace!("Notification worker: processing message for task_id: {}", internal_msg.task_id);
+              trace!("Notification worker: processing message for task_id: {}", internal_msg.core.task_id());
 
               let handlers_guard = handlers_list_arc.read().unwrap();
               if handlers_guard.is_empty() {
-                trace!(task_id = %internal_msg.task_id, "No completion handlers registered, dropping notification.");
+                trace!(task_id = %internal_msg.core.task_id(), "No completion handlers registered, dropping notification.");
                 continue;
               }
 
               let public_info = TaskCompletionInfo {
-                task_id: internal_msg.task_id,
+                task_id: internal_msg.core.task_id(),
                 pool_name: internal_msg.pool_name.clone(),
-                labels: internal_msg.labels.clone(),
+                labels: Arc::new(internal_msg.core.labels().clone()),
                 status: internal_msg.status,
                 completion_time: SystemTime::now(),
               };

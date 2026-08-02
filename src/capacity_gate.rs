@@ -51,6 +51,16 @@ impl CapacityGate {
     self.semaphore.try_acquire(1)
   }
 
+  /// Tries to acquire an owned permit without blocking.
+  pub fn try_acquire_owned(self: &Arc<Self>) -> Option<OwnedPermitGuard> {
+    self.semaphore.try_acquire(1).map(|temporary_guard| {
+      // Forgetting the releaser transfers the permit to `OwnedPermitGuard`, whose
+      // `Drop` releases it instead.
+      std::mem::forget(temporary_guard);
+      OwnedPermitGuard { gate: self.clone() }
+    })
+  }
+
   /// Releases a permit back to the gate.
   /// This is made `pub(crate)` to be visible to `task_queue.rs`.
   pub fn release(&self) {
