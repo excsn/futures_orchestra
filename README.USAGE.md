@@ -11,6 +11,7 @@ This guide provides detailed information on how to use the `futures_orchestra` l
     *   [ShutdownMode](#shutdownmode)
 *   [Main API Sections](#main-api-sections)
     *   [FuturePoolManager](#futurepoolmanager)
+    *   [FuturePoolManagerRlxd](#futurepoolmanagerrlxd)
     *   [TaskHandle](#taskhandle)
     *   [Task Types](#task-types)
     *   [Completion Notifications (`TaskCompletionInfo`, `TaskCompletionStatus`)](#completion-notifications)
@@ -23,13 +24,14 @@ This guide provides detailed information on how to use the `futures_orchestra` l
 ## Core Concepts
 
 *   **`FuturePoolManager<R>`**: The central struct for managing the pool. It handles task submission, queuing, worker lifecycle, and concurrency control. `FuturePoolManager` itself implements `Clone`, allowing multiple handles to the same underlying pool state. `R` is the success type returned by the futures.
+*   **`FuturePoolManagerRlxd<R>`**: A relaxed-ordering variant with the same features and API. It dispatches directly past the queue when the pool has spare capacity and nothing queued, and otherwise routes submissions round-robin across N dispatcher lanes, trading strict start-order FIFO for throughput.
 *   **Task (`TaskToExecute<R>`)**: A `Pin<Box<dyn Future<Output = R> + Send + 'static>>`. This is the type of future you submit to the pool.
 *   **`TaskHandle<R>`**: Returned upon successful task submission. It allows interaction with the submitted task, such as awaiting its result or requesting cancellation.
 *   **`TaskLabel`**: A `String` used to categorize tasks. Tasks can have multiple labels. These labels are primarily used for bulk cancellation.
 *   **`CompletionNotifier` System**: An internal system that allows users to register handlers to be notified about task completion events (success, panic, cancellation, etc.). See `FuturePoolManager::add_completion_handler`, `TaskCompletionInfo`, and `TaskCompletionStatus`.
 *   **Concurrency Gate**: An internal mechanism, built around a semaphore, controls how many tasks can run concurrently.
 *   **Queue**: An internal asynchronous, lock-free channel holds tasks that are waiting for a concurrency permit to run.
-*   **Cooperative Cancellation**: Cancellation is signaled via `tokio_util::sync::CancellationToken`. The pool uses `tokio::select!` to race task execution against its cancellation token. Futures themselves don't directly receive the token but are interrupted if the token is cancelled.
+*   **Cooperative Cancellation**: Cancellation is signaled via an internal lightweight cancellation flag per task. The pool races task execution against it, so futures themselves don't receive the token but are interrupted once it is set.
 *   **Worker Loop**: An internal asynchronous loop that dequeues tasks, acquires concurrency permits, and spawns tasks onto the provided Tokio runtime.
 
 ## Quick Start
@@ -179,6 +181,18 @@ The main entry point for interacting with the thread pool. It implements `Clone`
 
 **Drop Implementation:**
 If a `FuturePoolManager<R>` instance is dropped, and it's the last handle managing the underlying pool state, an implicit shutdown sequence is initiated. It signals the internal shutdown token and closes the task submission queue. This behaves like a graceful shutdown signal but does *not* block or await worker termination. For explicit control and to ensure workers join, call `shutdown()` manually.
+
+### `FuturePoolManagerRlxd<R: Send + 'static>`
+
+The relaxed-ordering pool. Every `FuturePoolManager` method exists with the same signature and semantics; the differences are the constructor and an extra submission method.
+
+*   `pub fn new(concurrency_limit: usize, queue_capacity: usize, dispatchers: usize, tokio_handle: Handle, pool_name: &str) -> Self`
+    Creates the pool with `dispatchers` dispatch lanes (clamped to at least 1; 2 is a sensible default).
+
+*   `pub async fn submit_future<F>(&self, labels: HashSet<TaskLabel>, task_future: F) -> Result<TaskHandle<R>, PoolError> where F: Future<Output = R> + Send + 'static`
+    Like `submit`, but takes the future unboxed. A directly dispatched task runs without the `Box::pin` allocation; the future is boxed only if it has to queue.
+
+Ordering contract: tasks are dequeued in submission order within a lane; across lanes, and when a direct dispatch bypasses an empty queue, start order is best-effort. The bypass only fires when nothing is queued, so no queued task is ever overtaken. Cancellation, labels, notifications, and shutdown behave exactly as in the strict pool.
 
 ### `TaskHandle<R: Send + 'static>`
 

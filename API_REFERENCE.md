@@ -9,6 +9,7 @@ This document provides a detailed API reference for the `futures_orchestra` libr
 #### Core Concepts
 
 *   **`FuturePoolManager`**: The central orchestrator and the main entry point to the library. It manages worker tasks, a task queue, and concurrency limits. It is cloneable (`Clone`), allowing multiple parts of an application to submit tasks to the same shared pool.
+*   **`FuturePoolManagerRlxd`**: A relaxed-ordering variant with the same features and API surface. Submissions dispatch directly when the pool has spare capacity and nothing queued, and otherwise route round-robin across N dispatcher lanes, each strictly ordered. Start order is strict within a lane and best-effort across lanes.
 *   **`TaskHandle`**: A handle returned upon task submission. It allows a user to await the task's result or request its cancellation individually.
 *   **Concurrency & Queuing**: The pool strictly limits the number of concurrently running tasks. Additional tasks are placed in a bounded queue, providing backpressure to the submitter if the queue is full.
 *   **Cancellation**: The library provides multiple cooperative cancellation mechanisms:
@@ -94,6 +95,42 @@ The central struct for creating, managing, and shutting down a task pool.
     pub async fn shutdown(self, mode: ShutdownMode) -> Result<(), PoolError>
     ```
     Initiates a clean shutdown of the pool, consuming the manager instance. The behavior is determined by the provided `ShutdownMode`.
+
+#### `FuturePoolManagerRlxd<R>`
+
+The relaxed-ordering pool. Every `FuturePoolManager` method above exists with the same signature and semantics, with these differences.
+
+**Generic Parameters:**
+*   `R: Send + 'static`: The return type of the futures that will be executed by this pool.
+
+##### Methods
+
+*   **Constructor**
+    ```rust
+    pub fn new(
+        concurrency_limit: usize,
+        queue_capacity: usize,
+        dispatchers: usize,
+        tokio_handle: tokio::runtime::Handle,
+        pool_name: &str
+    ) -> Self
+    ```
+    Creates a new `FuturePoolManagerRlxd` running `dispatchers` dispatch lanes. Clamped to at least 1; at 1 lane dequeue order is still strict. 2 is a sensible default.
+
+*   **Unboxed Task Submission**
+    ```rust
+    pub async fn submit_future<F>(
+        &self,
+        labels: std::collections::HashSet<TaskLabel>,
+        task_future: F
+    ) -> Result<TaskHandle<R>, PoolError>
+    where
+        F: std::future::Future<Output = R> + Send + 'static
+    ```
+    Like `submit`, but takes the future unboxed. When the task is dispatched directly (queue empty, capacity free) it runs without the `Box::pin` allocation; it is boxed only if it has to queue. The boxed `submit` is also available.
+
+*   **Ordering Contract**
+    Tasks are dequeued in submission order within a lane. With more than one lane, or when a direct dispatch bypasses an empty queue, a task can begin execution ahead of an earlier submission in another lane. The bypass only fires when nothing is queued, so no queued task is ever overtaken. Cancellation, labels, completion notifications, and shutdown carry the same guarantees as the strict pool.
 
 #### `TaskHandle<R>`
 
