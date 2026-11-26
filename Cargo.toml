@@ -9,6 +9,7 @@ repository = "https://github.com/excsn/futures_orchestra"
 readme = "README.md"
 keywords = ["async", "tokio", "concurrency", "future", "pool"]
 categories = ["asynchronous", "concurrency"]
+include = ["/src/**/*.rs", "/Cargo.toml", "/LICENSE", "/README.md", "/README.USAGE.md", "/API_REFERENCE.md"]
 
 [dependencies]
 fibre = { version = "0.7" }
