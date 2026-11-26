@@ -1,5 +1,4 @@
-use futures_intrusive::sync::{GenericSemaphoreReleaser, Semaphore};
-use parking_lot::RawMutex;
+use futures_intrusive::sync::{Semaphore, SemaphoreReleaser};
 use std::{future::Future, sync::Arc};
 
 #[derive(Debug)]
@@ -21,7 +20,7 @@ pub struct CapacityGate {
   semaphore: Semaphore,
 }
 
-pub(crate) type PermitGuard<'a> = GenericSemaphoreReleaser<'a, RawMutex>;
+pub(crate) type PermitGuard<'a> = SemaphoreReleaser<'a>;
 
 impl CapacityGate {
   pub fn new(capacity: usize) -> Self {
